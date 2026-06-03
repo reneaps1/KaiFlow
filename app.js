@@ -12,6 +12,35 @@ let state = null;
 let _redistribActive = false;
 let _redistribAssignments = null;
 
+const DASHBOARD_LINES_BY_AREA = {
+  Interior: [
+    'SUB ENSAMBLE 1',
+    'SUB ENSAMBLE 2',
+    'SUB ENSAMBLE 3',
+    'SUB ENSAMBLE 4',
+    'CADENA PILOTOS 1',
+    'CADENA PILOTOS 2',
+    'CADENA INTERIOR 1',
+    'CADENA INTERIOR 2'
+  ],
+  Motor: [
+    'SUB GTI',
+    'SGM',
+    'EMBF',
+    'KSMR',
+    'CADENA MOTOR 1',
+    'CADENA MOTOR 2'
+  ],
+  Tyron: [
+    'PUERTA 1',
+    'PUERTA 2'
+  ]
+};
+
+const DASHBOARD_DEFAULT_AREA = 'Interior';
+const DASHBOARD_DEFAULT_LINE = 'SUB ENSAMBLE 1';
+const DASHBOARD_PERIOD_SECONDS = { Hora: 3600, Turno: 28800 };
+
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -19,10 +48,16 @@ function loadState() {
   } catch {
     state = deepClone(DEFAULT_STATE);
   }
+  const catalogMigrated = normalizeManufacturingCatalog();
+  ensureTimeStudyStructure();
+  const hashPage = window.location.hash.replace('#', '');
+  if (PAGE_LABELS[hashPage]) state.currentPage = hashPage;
   // Ensure stationAssignments are populated
-  if (!state.stationAssignments || state.stationAssignments.length === 0) {
+  if (catalogMigrated || !state.stationAssignments || state.stationAssignments.length === 0) {
     state.stationAssignments = autoBalanceOperations(state);
   }
+  ensureDashboardState();
+  if (catalogMigrated) saveState();
 }
 
 function saveState() {
@@ -41,6 +76,7 @@ function resetState() {
       localStorage.removeItem(STORAGE_KEY);
       state = deepClone(DEFAULT_STATE);
       state.stationAssignments = autoBalanceOperations(state);
+      ensureDashboardState();
       saveState();
       renderApp();
       showToast('Datos restaurados al estado original', 'success');
@@ -65,6 +101,241 @@ function fmtPct(n) {
   return fmt(n, 1) + '%';
 }
 
+function normalizeManufacturingCatalog() {
+  const mustReplaceCatalog =
+    state.catalogVersion !== CATALOG_VERSION ||
+    !Array.isArray(state.operations) ||
+    state.operations.length !== MANUFACTURING_ACTIVITY_CATALOG.length ||
+    state.operations.some(op => !String(op.id || '').startsWith('ACT-'));
+
+  if (!mustReplaceCatalog) {
+    state.activityCatalog = deepClone(MANUFACTURING_ACTIVITY_CATALOG);
+    return false;
+  }
+
+  const preserved = {
+    currentPage: state.currentPage || DEFAULT_STATE.currentPage,
+    plant: state.plant || DEFAULT_STATE.plant,
+    area: state.area || DEFAULT_STATE.area,
+    line: state.line || DEFAULT_STATE.line,
+    process: state.process || DEFAULT_STATE.process,
+    balanceSettings: state.balanceSettings || DEFAULT_STATE.balanceSettings,
+    roles: state.roles || DEFAULT_STATE.roles
+  };
+
+  state = {
+    ...deepClone(DEFAULT_STATE),
+    ...deepClone(preserved),
+    catalogVersion: CATALOG_VERSION,
+    activityCatalog: deepClone(MANUFACTURING_ACTIVITY_CATALOG),
+    operations: buildDefaultOperations(),
+    standardTimes: buildDefaultStandardTimes(),
+    scenarios: deepClone(DEFAULT_STATE.scenarios),
+    timeStudyStructure: buildTimeStudyStructure(),
+    timeStudySelection: deepClone(DEFAULT_STATE.timeStudySelection),
+    stationAssignments: []
+  };
+
+  return true;
+}
+
+function collectTimeStudyFrequencySeed(structure) {
+  const seed = {};
+  (structure || []).forEach(station => {
+    (station.subconjuntos || station.subsets || []).forEach(subset => {
+      const subsetSeed = {};
+      (subset.actividades || subset.activities || []).forEach(activity => {
+        const key = activity.activityId || activity.id || activity.no;
+        subsetSeed[key] = Number(activity.frequency ?? activity.frecuencia ?? 0);
+      });
+      if (subset.id) seed[subset.id] = subsetSeed;
+      if (subset.name || subset.nombre) seed[subset.name || subset.nombre] = subsetSeed;
+    });
+  });
+  return seed;
+}
+
+function ensureTimeStudyStructure() {
+  const seed = collectTimeStudyFrequencySeed(state.timeStudyStructure);
+  state.timeStudyStructure = buildTimeStudyStructure(seed);
+  state.timeStudySelection = state.timeStudySelection || {};
+
+  const firstStation = state.timeStudyStructure[0];
+  const selectedStation =
+    state.timeStudyStructure.find(st => st.id === state.timeStudySelection.stationId) ||
+    firstStation;
+  const firstSubset = selectedStation?.subconjuntos?.[0];
+  const selectedSubset =
+    selectedStation?.subconjuntos?.find(sub => sub.id === state.timeStudySelection.subsetId) ||
+    firstSubset;
+
+  state.timeStudySelection.stationId = selectedStation?.id || 'station-1';
+  state.timeStudySelection.subsetId = selectedSubset?.id || 'station-1-subset-1';
+}
+
+function calculateActivityTC(activity) {
+  const std = Number(activity.std ?? activity.standardTime ?? 0);
+  const frequency = Number(activity.frequency ?? 0);
+  return Math.round(std * frequency * 100) / 100;
+}
+
+function calculateSubsetTotal(subset) {
+  return (subset?.actividades || []).reduce((sum, activity) => sum + calculateActivityTC(activity), 0);
+}
+
+function calculateStationTimeStudyTotal(station) {
+  return (station?.subconjuntos || []).reduce((sum, subset) => sum + calculateSubsetTotal(subset), 0);
+}
+
+function getSelectedTimeStudyContext() {
+  ensureTimeStudyStructure();
+  const station = state.timeStudyStructure.find(st => st.id === state.timeStudySelection.stationId) || state.timeStudyStructure[0];
+  const subset = station?.subconjuntos.find(sub => sub.id === state.timeStudySelection.subsetId) || station?.subconjuntos[0];
+  return { station, subset };
+}
+
+function csvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function dashboardLineKey(area, line) {
+  return `${area}||${line}`;
+}
+
+function getDefaultDashboardConfig(area = DASHBOARD_DEFAULT_AREA, line = DASHBOARD_DEFAULT_LINE) {
+  return {
+    area,
+    line,
+    period: 'Turno',
+    requiredPieces: 0,
+    availableSeconds: DASHBOARD_PERIOD_SECONDS.Turno
+  };
+}
+
+function ensureDashboardState() {
+  state.dashboardSelection = state.dashboardSelection || {
+    area: DASHBOARD_DEFAULT_AREA,
+    line: DASHBOARD_DEFAULT_LINE
+  };
+  if (!DASHBOARD_LINES_BY_AREA[state.dashboardSelection.area]) {
+    state.dashboardSelection.area = DASHBOARD_DEFAULT_AREA;
+  }
+  const lines = DASHBOARD_LINES_BY_AREA[state.dashboardSelection.area];
+  if (!lines.includes(state.dashboardSelection.line)) {
+    state.dashboardSelection.line = lines[0];
+  }
+  state.dashboardLineConfigs = state.dashboardLineConfigs || {};
+}
+
+function getDashboardLineConfig(area, line) {
+  ensureDashboardState();
+  const saved = state.dashboardLineConfigs[dashboardLineKey(area, line)];
+  return saved ? { ...getDefaultDashboardConfig(area, line), ...saved, area, line } : getDefaultDashboardConfig(area, line);
+}
+
+function saveDashboardLineConfig(config) {
+  ensureDashboardState();
+  state.dashboardLineConfigs[dashboardLineKey(config.area, config.line)] = {
+    area: config.area,
+    line: config.line,
+    period: config.period,
+    requiredPieces: Number(config.requiredPieces) || 0,
+    availableSeconds: Number(config.availableSeconds) || 0
+  };
+}
+
+function findDashboardStoredBalance(area, line) {
+  const key = dashboardLineKey(area, line);
+  const stores = [
+    state.dashboardLineBalances,
+    state.savedLineBalances,
+    state.lineBalances,
+    state.balanceosGuardados
+  ].filter(Boolean);
+
+  for (const store of stores) {
+    if (Array.isArray(store)) {
+      const match = store.find(item =>
+        item &&
+        (item.area === area || item.areaName === area) &&
+        (item.line === line || item.lineName === line)
+      );
+      if (match) return match;
+    } else if (store[key]) {
+      return store[key];
+    }
+  }
+
+  if (area === DASHBOARD_DEFAULT_AREA && line === DASHBOARD_DEFAULT_LINE && state.stationAssignments?.length) {
+    return { assignments: state.stationAssignments };
+  }
+
+  return null;
+}
+
+function getDashboardOperatorLoads(area, line) {
+  const balance = findDashboardStoredBalance(area, line);
+  if (!balance) return [];
+
+  if (Array.isArray(balance)) {
+    const loads = calculateStationLoads(balance);
+    return Object.keys(loads).map(Number).sort((a, b) => a - b).map((station, index) => ({
+      label: `OP${index + 1}`,
+      time: loads[station] || 0
+    }));
+  }
+
+  const assignments = balance.assignments || balance.stationAssignments || balance.asignaciones;
+  if (Array.isArray(assignments) && assignments.length) {
+    const loads = calculateStationLoads(assignments);
+    return Object.keys(loads).map(Number).sort((a, b) => a - b).map((station, index) => ({
+      label: `OP${index + 1}`,
+      time: loads[station] || 0
+    }));
+  }
+
+  const operatorRows = balance.operatorLoads || balance.operators || balance.operadores;
+  if (Array.isArray(operatorRows) && operatorRows.length) {
+    return operatorRows.map((op, index) => ({
+      label: `OP${index + 1}`,
+      time: Number(op.time ?? op.load ?? op.totalTime ?? op.standardTime ?? op.seconds ?? 0)
+    })).filter(op => op.time > 0);
+  }
+
+  const stationLoads = balance.stationLoads || balance.loads;
+  if (stationLoads && typeof stationLoads === 'object') {
+    return Object.keys(stationLoads).map(Number).sort((a, b) => a - b).map((station, index) => ({
+      label: `OP${index + 1}`,
+      time: Number(stationLoads[station] || 0)
+    })).filter(op => op.time > 0);
+  }
+
+  return [];
+}
+
+function computeDashboardMetrics(config, operatorLoads) {
+  const requiredPieces = Math.max(0, Number(config.requiredPieces) || 0);
+  const availableSeconds = Math.max(0, Number(config.availableSeconds) || 0);
+  const takt = requiredPieces > 0 ? availableSeconds / requiredPieces : 0;
+  const totalWorkContent = operatorLoads.reduce((sum, op) => sum + op.time, 0);
+  const operatorCount = operatorLoads.length;
+  const bottleneck = operatorLoads.reduce((max, op) => op.time > max.time ? op : max, { label: 'N/A', time: 0 });
+  const efficiency = operatorCount > 0 && takt > 0 ? (totalWorkContent / (operatorCount * takt)) * 100 : 0;
+  const capacity = bottleneck.time > 0 ? Math.floor(availableSeconds / bottleneck.time) : 0;
+
+  return {
+    requiredPieces,
+    availableSeconds,
+    takt,
+    totalWorkContent,
+    operatorCount,
+    bottleneck,
+    efficiency,
+    capacity,
+    hasBalance: operatorCount > 0
+  };
+}
+
 // ── Calculations ───────────────────────────────
 function getActiveOperations(s) {
   return (s || state).operations.filter(op => op.active);
@@ -81,7 +352,7 @@ function calculateTaktTime(settings) {
 }
 
 function calculateTotalWorkContent(ops) {
-  return ops.reduce((sum, op) => sum + op.standardTime, 0);
+  return Math.round(ops.reduce((sum, op) => sum + op.standardTime, 0) * 100) / 100;
 }
 
 function calculateRequiredOperators(twc, takt) {
@@ -135,8 +406,7 @@ function autoBalanceOperations(s) {
       station,
       standardTime: op.standardTime,
       sequence: op.sequence,
-      name: op.name,
-      code: op.code
+      name: op.name
     });
   });
 
@@ -245,109 +515,220 @@ function renderPlaceholder(title, sub) {
 }
 
 // ── Dashboard ─────────────────────────────────
+function renderDashboardMetricCards(metrics, period) {
+  if (!metrics.hasBalance) {
+    return `
+      <div class="dashboard-empty-state">
+        <strong>No hay balanceo guardado para esta línea. Crea o asigna un balanceo primero.</strong>
+        <span>Los cálculos se mostrarán cuando exista una carga por operador para la línea seleccionada.</span>
+      </div>`;
+  }
+
+  const piecesLabel = period === 'Hora' ? 'Piezas requeridas por hora' : 'Piezas requeridas por turno';
+  const taktValue = metrics.takt > 0 ? fmt(metrics.takt, 2) : 'N/A';
+  const bottleneckLabel = metrics.bottleneck.time > 0
+    ? `${metrics.bottleneck.label} · ${fmt(metrics.bottleneck.time, 2)}s`
+    : 'N/A';
+
+  return `
+    <div class="kpi-grid dashboard-kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">${piecesLabel}</div>
+        <div class="kpi-value">${metrics.requiredPieces.toLocaleString('es-MX')}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Tiempo disponible</div>
+        <div class="kpi-value">${metrics.availableSeconds.toLocaleString('es-MX')}<span class="kpi-unit">seg</span></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Takt Time</div>
+        <div class="kpi-value">${taktValue}<span class="kpi-unit">${metrics.takt > 0 ? 'seg' : ''}</span></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Número de operadores</div>
+        <div class="kpi-value">${metrics.operatorCount}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Eficiencia</div>
+        <div class="kpi-value ${metrics.efficiency >= 80 ? 'kpi-value--green' : metrics.efficiency >= 65 ? 'kpi-value--warning' : 'kpi-value--danger'}">${fmtPct(metrics.efficiency)}</div>
+      </div>
+      <div class="kpi-card ${metrics.bottleneck.time > metrics.takt && metrics.takt > 0 ? 'kpi-card--danger' : ''}">
+        <div class="kpi-label">Cuello de botella</div>
+        <div class="kpi-value" style="font-size:var(--font-16);font-weight:700">${bottleneckLabel}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Capacidad máxima</div>
+        <div class="kpi-value">${metrics.capacity}</div>
+      </div>
+    </div>`;
+}
+
+function renderDashboardOperatorChart(metrics, operatorLoads) {
+  if (!metrics.hasBalance) {
+    return `
+      <div class="dashboard-chart-empty">
+        <span>Sin datos de operadores para graficar</span>
+      </div>`;
+  }
+
+  const chartHeight = 260;
+  const maxLoad = Math.max(...operatorLoads.map(op => op.time), metrics.takt || 0, 1);
+  const maxVal = Math.ceil((maxLoad * 1.2) / 10) * 10 || 10;
+  const scale = chartHeight / maxVal;
+  const taktBottom = metrics.takt > 0 ? Math.round(metrics.takt * scale) : 0;
+
+  return `
+    <div class="dashboard-chart">
+      ${metrics.takt > 0 ? `
+        <div class="dashboard-chart-takt" style="bottom:${taktBottom}px">
+          <span>Takt ${fmt(metrics.takt, 2)}s</span>
+        </div>` : ''}
+      <div class="dashboard-chart-bars">
+        ${operatorLoads.map(op => {
+          const height = Math.max(Math.round(op.time * scale), 2);
+          const status = metrics.takt > 0 && op.time > metrics.takt
+            ? 'over'
+            : metrics.takt > 0 && op.time >= metrics.takt * 0.9
+              ? 'near'
+              : 'ok';
+          const isBottleneck = op.label === metrics.bottleneck.label;
+          return `
+            <div class="dashboard-chart-bar-col">
+              <div class="dashboard-chart-value">${fmt(op.time, 1)}s</div>
+              <div class="dashboard-chart-bar dashboard-chart-bar--${status}${isBottleneck ? ' bottleneck' : ''}" style="height:${height}px"></div>
+              <div class="dashboard-chart-label">${op.label}</div>
+            </div>`;
+        }).join('')}
+      </div>
+    </div>`;
+}
+
 function renderDashboard(container) {
-  const s = computeSummary();
-  const taktOk = !s.hasBottleneck;
-  const effClass = s.efficiency >= 80 ? 'kpi-value--green' : s.efficiency >= 65 ? 'kpi-value--warning' : 'kpi-value--danger';
-  const availableH = (s.available / 3600).toFixed(2);
+  ensureDashboardState();
+  const { area, line } = state.dashboardSelection;
+  const config = getDashboardLineConfig(area, line);
+  const areaOptions = Object.keys(DASHBOARD_LINES_BY_AREA).map(name =>
+    `<option value="${esc(name)}"${name === area ? ' selected' : ''}>${esc(name)}</option>`
+  ).join('');
+  const lineOptions = DASHBOARD_LINES_BY_AREA[area].map(name =>
+    `<option value="${esc(name)}"${name === line ? ' selected' : ''}>${esc(name)}</option>`
+  ).join('');
 
   container.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">Dashboard</h1>
-      <p class="page-subtitle">Resumen de balanceo de línea · ${state.line.name}</p>
+      <p class="page-subtitle">Indicadores de balanceo por área y línea</p>
     </div>
 
-    <!-- Workflow visual -->
-    <div class="workflow-bar mb-6">
-      ${Object.entries(PAGE_LABELS).filter(([k]) => k !== 'permissions').map(([page, label]) => `
-        <span class="workflow-step${state.currentPage === page ? ' active' : ''}" data-nav="${page}">${label}</span>
-        ${page !== 'report' ? '<span class="workflow-sep" aria-hidden="true">›</span>' : ''}
-      `).join('')}
-    </div>
-
-    <!-- KPI Grid -->
-    <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label">Planta</div>
-        <div class="kpi-value" style="font-size: var(--font-16); font-weight: 600;">${state.plant.name}</div>
-        <div class="kpi-meta">${state.plant.code}</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Área</div>
-        <div class="kpi-value" style="font-size: var(--font-16); font-weight: 600;">${state.area.name}</div>
-        <div class="kpi-meta">${state.area.code}</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Línea</div>
-        <div class="kpi-value" style="font-size: var(--font-14); font-weight: 600;">${state.line.name}</div>
-        <div class="kpi-meta">${state.line.code}</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Proceso</div>
-        <div class="kpi-value" style="font-size: var(--font-12); font-weight: 600; line-height: 1.4;">${state.process.name}</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Piezas requeridas / turno</div>
-        <div class="kpi-value">${state.balanceSettings.requiredQuantity.toLocaleString('es-MX')}</div>
-        <div class="kpi-meta">${state.balanceSettings.shiftHours}h turno · ${state.balanceSettings.breakMinutes}min descanso</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Tiempo disponible</div>
-        <div class="kpi-value">${availableH}<span class="kpi-unit">h</span></div>
-        <div class="kpi-meta">${s.available.toLocaleString('es-MX')} segundos</div>
-      </div>
-      <div class="kpi-card ${taktOk ? '' : 'kpi-card--danger'}">
-        <div class="kpi-label">Takt Time</div>
-        <div class="kpi-value ${taktOk ? 'kpi-value--green' : 'kpi-value--danger'}">${fmt(s.takt)}<span class="kpi-unit">seg</span></div>
-        <div class="kpi-meta">${taktOk ? 'Línea factible' : '⚠ Cuello de botella activo'}</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Contenido total de trabajo</div>
-        <div class="kpi-value">${s.twc}<span class="kpi-unit">seg</span></div>
-        <div class="kpi-meta">${getActiveOperations().length} operaciones activas</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Operadores sugeridos</div>
-        <div class="kpi-value kpi-value--green">${s.reqOps}</div>
-        <div class="kpi-meta">${s.numStations} estaciones actuales</div>
-      </div>
-      <div class="kpi-card ${s.efficiency < 70 ? 'kpi-card--warning' : ''}">
-        <div class="kpi-label">Eficiencia de balanceo</div>
-        <div class="kpi-value ${effClass}">${fmtPct(s.efficiency)}</div>
-        <div class="kpi-meta">${s.efficiency >= 80 ? 'Óptima' : s.efficiency >= 65 ? 'Aceptable' : 'Baja — revisar asignación'}</div>
-      </div>
-      <div class="kpi-card ${s.hasBottleneck ? 'kpi-card--danger' : ''}">
-        <div class="kpi-label">Cuello de botella</div>
-        <div class="kpi-value" style="font-size: var(--font-16); font-weight: 700; ${s.hasBottleneck ? 'color: var(--danger)' : 'color: var(--success)'}">
-          Estación ${s.bottleneck.station}
+    <div class="card mb-6">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Filtros y periodo</div>
+          <div class="card-subtitle">La configuración se guarda de forma independiente por línea</div>
         </div>
-        <div class="kpi-meta">${fmt(s.bottleneck.load)} seg ${s.hasBottleneck ? '— SOBRECARGADA ⚠' : '(mayor carga)'}</div>
+        <button class="btn btn--primary" id="dashboard-save">Actualizar Dashboard</button>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Capacidad máx / hora</div>
-        <div class="kpi-value">${s.capacity}</div>
-        <div class="kpi-meta">piezas por hora</div>
+      <div class="card-body">
+        <div class="dashboard-controls">
+          <div class="form-group">
+            <label class="form-label" for="dashboard-area">Área</label>
+            <select class="form-select" id="dashboard-area">${areaOptions}</select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="dashboard-line">Línea</label>
+            <select class="form-select" id="dashboard-line">${lineOptions}</select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="dashboard-period">Periodo</label>
+            <select class="form-select" id="dashboard-period">
+              <option value="Hora"${config.period === 'Hora' ? ' selected' : ''}>Hora</option>
+              <option value="Turno"${config.period === 'Turno' ? ' selected' : ''}>Turno</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" id="dashboard-pieces-label" for="dashboard-pieces">${config.period === 'Hora' ? 'Piezas requeridas por hora' : 'Piezas requeridas por turno'}</label>
+            <input class="form-input" id="dashboard-pieces" type="number" min="0" step="1" value="${config.requiredPieces}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="dashboard-available">Tiempo disponible en segundos</label>
+            <input class="form-input" id="dashboard-available" type="number" min="0" step="1" value="${config.availableSeconds}" />
+          </div>
+        </div>
       </div>
     </div>
 
-    <!-- Quick actions -->
-    <div class="section-header mt-4">
-      <div>
-        <div class="section-title">Acceso rápido</div>
-        <div class="section-subtitle">Navega a los módulos principales</div>
-      </div>
-    </div>
-    <div class="btn-group mb-6">
-      <button class="btn btn--secondary" data-nav="balance">Ir a Balanceo</button>
-      <button class="btn btn--secondary" data-nav="yamazumi">Ver Yamazumi</button>
-      <button class="btn btn--secondary" data-nav="scenarios">Comparar Escenarios</button>
-      <button class="btn btn--ghost" data-nav="report">Generar Reporte</button>
-    </div>`;
+    <div id="dashboard-metrics"></div>
 
-  // Workflow + quick action nav
-  container.querySelectorAll('[data-nav]').forEach(el => {
-    el.addEventListener('click', () => navigate(el.dataset.nav));
+    <div class="card dashboard-chart-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Gráfico de tiempos por operador</div>
+          <div class="card-subtitle">Comparación de OP1, OP2, OP3 contra Takt Time</div>
+        </div>
+      </div>
+      <div class="card-body" id="dashboard-chart-wrap"></div>
+    </div>
+  `;
+
+  const areaEl = container.querySelector('#dashboard-area');
+  const lineEl = container.querySelector('#dashboard-line');
+  const periodEl = container.querySelector('#dashboard-period');
+  const piecesEl = container.querySelector('#dashboard-pieces');
+  const availableEl = container.querySelector('#dashboard-available');
+  const piecesLabel = container.querySelector('#dashboard-pieces-label');
+  const metricsEl = container.querySelector('#dashboard-metrics');
+  const chartEl = container.querySelector('#dashboard-chart-wrap');
+
+  const readDraft = () => ({
+    area: areaEl.value,
+    line: lineEl.value,
+    period: periodEl.value,
+    requiredPieces: Math.max(0, parseInt(piecesEl.value) || 0),
+    availableSeconds: Math.max(0, parseInt(availableEl.value) || 0)
   });
+
+  const refreshDashboard = () => {
+    const draft = readDraft();
+    piecesLabel.textContent = draft.period === 'Hora' ? 'Piezas requeridas por hora' : 'Piezas requeridas por turno';
+    const operatorLoads = getDashboardOperatorLoads(draft.area, draft.line);
+    const metrics = computeDashboardMetrics(draft, operatorLoads);
+    metricsEl.innerHTML = renderDashboardMetricCards(metrics, draft.period);
+    chartEl.innerHTML = renderDashboardOperatorChart(metrics, operatorLoads);
+  };
+
+  areaEl.addEventListener('change', () => {
+    state.dashboardSelection.area = areaEl.value;
+    state.dashboardSelection.line = DASHBOARD_LINES_BY_AREA[areaEl.value][0];
+    saveState();
+    renderDashboard(container);
+  });
+
+  lineEl.addEventListener('change', () => {
+    state.dashboardSelection.line = lineEl.value;
+    saveState();
+    renderDashboard(container);
+  });
+
+  periodEl.addEventListener('change', () => {
+    availableEl.value = DASHBOARD_PERIOD_SECONDS[periodEl.value];
+    refreshDashboard();
+  });
+
+  [piecesEl, availableEl].forEach(input => {
+    input.addEventListener('input', refreshDashboard);
+  });
+
+  container.querySelector('#dashboard-save').addEventListener('click', () => {
+    const draft = readDraft();
+    saveDashboardLineConfig(draft);
+    state.dashboardSelection.area = draft.area;
+    state.dashboardSelection.line = draft.line;
+    saveState();
+    refreshDashboard();
+    showToast('Dashboard actualizado para esta línea', 'success');
+  });
+
+  refreshDashboard();
 }
 
 // ── Stubs para fases futuras ──────────────────
@@ -367,22 +748,22 @@ function renderCatalogs(container) {
       <div class="entity-card">
         <div class="entity-card-label">Planta</div>
         <div class="entity-card-name">${esc(state.plant.name)}</div>
-        <div class="entity-card-meta">${esc(state.plant.code)} · ${esc(state.plant.location)}</div>
+        <div class="entity-card-meta">${esc(state.plant.location)}</div>
       </div>
       <div class="entity-card">
         <div class="entity-card-label">Área</div>
         <div class="entity-card-name">${esc(state.area.name)}</div>
-        <div class="entity-card-meta">${esc(state.area.code)}</div>
+        <div class="entity-card-meta">${esc(state.process.name)}</div>
       </div>
       <div class="entity-card">
         <div class="entity-card-label">Línea de Producción</div>
         <div class="entity-card-name">${esc(state.line.name)}</div>
-        <div class="entity-card-meta">${esc(state.line.code)} · ${esc(state.line.type)}</div>
+        <div class="entity-card-meta">${esc(state.line.type)}</div>
       </div>
       <div class="entity-card">
         <div class="entity-card-label">Proceso</div>
         <div class="entity-card-name">${esc(state.process.name)}</div>
-        <div class="entity-card-meta">${esc(state.process.code)}</div>
+        <div class="entity-card-meta">${active} actividades activas</div>
       </div>
     </div>
 
@@ -399,8 +780,7 @@ function renderCatalogs(container) {
           <thead>
             <tr>
               <th style="width:44px">#</th>
-              <th style="width:100px">Código</th>
-              <th>Nombre de Operación</th>
+              <th>Actividad</th>
               <th style="width:130px">Tiempo Est. (s)</th>
               <th style="width:90px">Estado</th>
               <th style="width:90px">Orden</th>
@@ -411,7 +791,6 @@ function renderCatalogs(container) {
             ${ops.map((op, i) => `
               <tr class="${!op.active ? 'row--inactive' : op.standardTime > takt ? 'row--overload' : ''}">
                 <td class="font-mono" style="color:var(--text-muted);font-size:var(--font-12)">${op.sequence}</td>
-                <td><span class="badge badge--neutral">${esc(op.code)}</span></td>
                 <td>
                   ${esc(op.name)}
                   ${op.isTemporary ? '<span class="badge badge--warning" style="margin-left:6px">Temporal</span>' : ''}
@@ -563,254 +942,227 @@ function renderStandardTimes(container) {
 }
 
 function renderTimeStudy(container) {
-  const activeOps    = getActiveOperations();
-  const savedStudies = state.timeStudies || [];
+  ensureTimeStudyStructure();
+  const { station, subset } = getSelectedTimeStudyContext();
+  const stationTotal = calculateStationTimeStudyTotal(station);
+  const subsetTotal = calculateSubsetTotal(subset);
+  const totalAcrossSubsets = state.timeStudyStructure.reduce((sum, st) => sum + calculateStationTimeStudyTotal(st), 0);
+
+  const stationButtons = state.timeStudyStructure.map(st => `
+    <button class="btn ${st.id === station.id ? 'btn--primary' : 'btn--secondary'} btn--sm" data-ts-station="${esc(st.id)}">
+      ${esc(st.name)}
+    </button>
+  `).join('');
+
+  const subsetButtons = station.subconjuntos.map(sub => `
+    <button class="btn ${sub.id === subset.id ? 'btn--primary' : 'btn--ghost'} btn--sm" data-ts-subset="${esc(sub.id)}">
+      ${esc(sub.name)}
+      <span class="badge badge--neutral" style="margin-left:4px">${fmt(calculateSubsetTotal(sub), 2)}s</span>
+    </button>
+  `).join('');
 
   container.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">Estudios de Tiempo</h1>
-      <p class="page-subtitle">Cronómetro y análisis de tiempos observados · ${esc(state.line.name)}</p>
+      <p class="page-subtitle">Catálogo de actividades por estación y subconjunto · ${esc(state.line.name)}</p>
     </div>
 
-    <div class="two-col-layout">
-      <!-- ── Captura ── -->
-      <div>
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">Captura de Observaciones</div>
+    <div class="entity-grid mb-6" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+      <div class="entity-card">
+        <div class="entity-card-label">Estación seleccionada</div>
+        <div class="entity-card-name">${esc(station.name)}</div>
+        <div class="entity-card-meta">${fmt(stationTotal, 2)} seg acumulados</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Subconjunto</div>
+        <div class="entity-card-name">${esc(subset.name)}</div>
+        <div class="entity-card-meta">${subset.actividades.length} actividades</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Total subconjunto</div>
+        <div class="entity-card-name" id="ts-subset-total-card" style="color:var(--green-600)">${fmt(subsetTotal, 2)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
+        <div class="entity-card-meta">Suma de TC</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Total estudios</div>
+        <div class="entity-card-name">${fmt(totalAcrossSubsets, 2)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
+        <div class="entity-card-meta">Todas las estaciones</div>
+      </div>
+    </div>
+
+    <div class="card mb-6">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Selección de estación y subconjunto</div>
+          <div class="card-subtitle">Cada subconjunto conserva sus propias frecuencias</div>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="time-study-selector">
+          <div>
+            <div class="form-label">Estación</div>
+            <div class="btn-group">${stationButtons}</div>
           </div>
-          <div class="card-body">
-            <div class="form-group">
-              <label class="form-label" for="ts-op">Operación</label>
-              <select class="form-select w-full" id="ts-op">
-                <option value="">— Selecciona una operación —</option>
-                ${activeOps.map(op =>
-                  `<option value="${op.id}">${op.sequence}. ${esc(op.name)} · ${op.standardTime}s actual</option>`
-                ).join('')}
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label class="form-label">Tiempos Observados (seg)</label>
-              <div class="obs-grid">
-                ${[1,2,3,4,5].map(n => `
-                  <div class="obs-item">
-                    <span class="obs-num">Obs ${n}</span>
-                    <input class="form-input obs-input" id="ts-obs-${n}"
-                      type="number" min="0" step="0.1" placeholder="0.0" />
-                  </div>
-                `).join('')}
-              </div>
-            </div>
-
-            <div class="form-row">
-              <div class="form-group">
-                <label class="form-label" for="ts-perf">Factor Desempeño</label>
-                <input class="form-input" id="ts-perf" type="number"
-                  min="0.5" max="1.5" step="0.01" value="1.00" />
-                <span class="form-hint">1.00 = ritmo normal</span>
-              </div>
-              <div class="form-group">
-                <label class="form-label" for="ts-allow">Factor Tolerancia</label>
-                <input class="form-input" id="ts-allow" type="number"
-                  min="0" max="0.5" step="0.01" value="0.10" />
-                <span class="form-hint">0.10 = 10% suplemento</span>
-              </div>
-            </div>
-
-            <div style="display:flex;gap:var(--sp-3);margin-top:var(--sp-4)">
-              <button class="btn btn--ghost" id="ts-clear">Limpiar</button>
-              <button class="btn btn--primary w-full" id="ts-apply" disabled>
-                Aplicar como Tiempo Estándar Temporal
-              </button>
-            </div>
+          <div>
+            <div class="form-label">Subconjunto</div>
+            <div class="btn-group">${subsetButtons}</div>
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- ── Resultados ── -->
+    <div class="two-col-layout">
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">${esc(station.name)} · ${esc(subset.name)}</div>
+            <div class="card-subtitle">TC = STD × Frecuencia</div>
+          </div>
+          <button class="btn btn--ghost btn--sm" id="ts-reset-subset">Limpiar frecuencias</button>
+        </div>
+        <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
+          <table class="time-study-table">
+            <thead>
+              <tr>
+                <th style="width:56px">No.</th>
+                <th>Actividad</th>
+                <th class="text-right" style="width:100px">STD</th>
+                <th class="text-right" style="width:140px">Frecuencia</th>
+                <th class="text-right" style="width:100px">TC</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${subset.actividades.map(activity => `
+                <tr>
+                  <td class="font-mono" style="color:var(--text-muted)">${activity.no}</td>
+                  <td>${esc(activity.name)}</td>
+                  <td class="text-right font-mono">${fmt(activity.std, 2)}</td>
+                  <td class="text-right">
+                    <input
+                      class="form-input time-study-frequency"
+                      data-activity-id="${esc(activity.activityId)}"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value="${activity.frequency}"
+                    />
+                  </td>
+                  <td class="text-right font-mono">
+                    <strong data-tc="${esc(activity.activityId)}">${fmt(calculateActivityTC(activity), 2)}</strong>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colspan="4" style="text-align:right;font-weight:700">Total Subconjunto</td>
+                <td class="text-right font-mono"><strong id="ts-subset-total">${fmt(subsetTotal, 2)}</strong></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
       <div style="display:flex;flex-direction:column;gap:var(--sp-4)">
         <div class="card">
           <div class="card-header">
-            <div class="card-title">Resultados del Estudio</div>
+            <div class="card-title">Totales por subconjunto</div>
           </div>
-          <div class="card-body" id="ts-results">
-            <div style="text-align:center;padding:var(--sp-8) 0;color:var(--text-muted)">
-              Ingresa al menos una observación para ver los cálculos
+          <div class="card-body">
+            <div class="time-study-total-list">
+              ${state.timeStudyStructure.map(st => `
+                <div class="time-study-total-group">
+                  <div class="time-study-total-station">
+                    <span>${esc(st.name)}</span>
+                    <strong>${fmt(calculateStationTimeStudyTotal(st), 2)}s</strong>
+                  </div>
+                  ${st.subconjuntos.map(sub => `
+                    <button class="time-study-total-row ${sub.id === subset.id ? 'active' : ''}" data-ts-jump="${esc(st.id)}:${esc(sub.id)}">
+                      <span>${esc(sub.name)}</span>
+                      <strong>${fmt(calculateSubsetTotal(sub), 2)}s</strong>
+                    </button>
+                  `).join('')}
+                </div>
+              `).join('')}
             </div>
           </div>
         </div>
 
-        ${savedStudies.length > 0 ? `
-          <div class="card">
-            <div class="card-header">
-              <div class="card-title">Historial de Estudios</div>
-              <span class="badge badge--neutral">${savedStudies.length}</span>
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title">Reglas de cálculo</div>
+          </div>
+          <div class="card-body">
+            <div class="time-study-rule">
+              <span>Frecuencia = 0</span>
+              <strong>TC = 0.00s</strong>
             </div>
-            <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
-              <table>
-                <thead><tr>
-                  <th>Operación</th><th>Prom (s)</th>
-                  <th>T. Estándar (s)</th><th>Fecha</th><th>Estado</th>
-                </tr></thead>
-                <tbody>
-                  ${[...savedStudies].reverse().slice(0,8).map(study => {
-                    const op = state.operations.find(o => o.id === study.operationId);
-                    return `<tr>
-                      <td style="font-size:var(--font-12)">${esc(op?.name ?? '—')}</td>
-                      <td class="font-mono">${fmt(study.avgTime)}</td>
-                      <td class="font-mono"><strong>${fmt(study.suggestedStdTime)}</strong></td>
-                      <td style="font-size:var(--font-12);color:var(--text-muted)">${study.date ?? '—'}</td>
-                      <td>${study.applied
-                        ? '<span class="badge badge--success">Aplicado</span>'
-                        : '<span class="badge badge--neutral">No aplicado</span>'}</td>
-                    </tr>`;
-                  }).join('')}
-                </tbody>
-              </table>
+            <div class="time-study-rule">
+              <span>Frecuencia editable</span>
+              <strong>Actualiza TC</strong>
             </div>
-          </div>` : ''}
+            <div class="time-study-rule">
+              <span>Total Subconjunto</span>
+              <strong>Suma de TC</strong>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   `;
 
-  function getObs() {
-    return [1,2,3,4,5]
-      .map(n => parseFloat(document.getElementById(`ts-obs-${n}`)?.value))
-      .filter(v => !isNaN(v) && v > 0);
-  }
-
-  function recalc() {
-    const obs      = getObs();
-    const perf     = parseFloat(document.getElementById('ts-perf').value)  || 1.0;
-    const allow    = parseFloat(document.getElementById('ts-allow').value) || 0.1;
-    const opSel    = document.getElementById('ts-op');
-    const applyBtn = document.getElementById('ts-apply');
-    const results  = document.getElementById('ts-results');
-
-    applyBtn.disabled = obs.length === 0 || !opSel.value;
-
-    if (obs.length === 0) {
-      results.innerHTML = `<div style="text-align:center;padding:var(--sp-8) 0;color:var(--text-muted)">Ingresa al menos una observación para ver los cálculos</div>`;
-      return;
-    }
-
-    const avg     = obs.reduce((a, b) => a + b, 0) / obs.length;
-    const minObs  = Math.min(...obs);
-    const maxObs  = Math.max(...obs);
-    const range   = maxObs - minObs;
-    const normal  = avg * perf;
-    const stdTime = normal * (1 + allow);
-    const takt    = calculateTaktTime(state.balanceSettings);
-    const overTakt = stdTime > takt;
-
-    applyBtn.dataset.stdTime = stdTime;
-    applyBtn.dataset.avg     = avg;
-
-    results.innerHTML = `
-      <div class="ts-stats-grid">
-        <div class="ts-stat">
-          <div class="ts-stat-label">Obs. válidas</div>
-          <div class="ts-stat-value">${obs.length} / 5</div>
-        </div>
-        <div class="ts-stat">
-          <div class="ts-stat-label">Promedio</div>
-          <div class="ts-stat-value">${fmt(avg)}</div>
-          <div class="ts-stat-hint">segundos</div>
-        </div>
-        <div class="ts-stat">
-          <div class="ts-stat-label">Mínimo</div>
-          <div class="ts-stat-value">${fmt(minObs)}</div>
-        </div>
-        <div class="ts-stat">
-          <div class="ts-stat-label">Máximo</div>
-          <div class="ts-stat-value">${fmt(maxObs)}</div>
-        </div>
-        <div class="ts-stat">
-          <div class="ts-stat-label">Rango</div>
-          <div class="ts-stat-value">${fmt(range)}</div>
-        </div>
-        <div class="ts-stat">
-          <div class="ts-stat-label">Tiempo Normal</div>
-          <div class="ts-stat-value">${fmt(normal)}</div>
-          <div class="ts-stat-hint">${fmt(avg)} × ${perf}</div>
-        </div>
-      </div>
-
-      <div class="ts-result-highlight ${overTakt ? 'ts-result-highlight--warning' : ''}">
-        <div class="ts-result-label">Tiempo Estándar Sugerido</div>
-        <div class="ts-result-value">${fmt(stdTime)}
-          <span style="font-size:var(--font-18);font-weight:500;opacity:0.7"> seg</span>
-        </div>
-        <div class="ts-result-formula">
-          = ${fmt(normal)} × (1 + ${allow}) · Takt: ${fmt(takt)} seg
-        </div>
-        ${overTakt ? `
-          <div style="margin-top:var(--sp-2)">
-            <span class="badge badge--warning">⚠ Excede el takt en ${fmt(stdTime - takt)} seg</span>
-          </div>` : ''}
-      </div>
-    `;
-  }
-
-  [1,2,3,4,5].forEach(n =>
-    document.getElementById(`ts-obs-${n}`)?.addEventListener('input', recalc));
-  document.getElementById('ts-perf')?.addEventListener('input', recalc);
-  document.getElementById('ts-allow')?.addEventListener('input', recalc);
-  document.getElementById('ts-op')?.addEventListener('change', recalc);
-
-  document.getElementById('ts-clear')?.addEventListener('click', () => {
-    [1,2,3,4,5].forEach(n => { const el = document.getElementById(`ts-obs-${n}`); if (el) el.value = ''; });
-    document.getElementById('ts-perf').value  = '1.00';
-    document.getElementById('ts-allow').value = '0.10';
-    recalc();
+  container.querySelectorAll('[data-ts-station]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const nextStation = state.timeStudyStructure.find(st => st.id === btn.dataset.tsStation);
+      if (!nextStation) return;
+      state.timeStudySelection.stationId = nextStation.id;
+      state.timeStudySelection.subsetId = nextStation.subconjuntos[0]?.id;
+      saveState();
+      renderTimeStudy(container);
+    });
   });
 
-  document.getElementById('ts-apply')?.addEventListener('click', () => {
-    const opId     = document.getElementById('ts-op').value;
-    const applyBtn = document.getElementById('ts-apply');
-    const stdTime  = parseFloat(applyBtn.dataset.stdTime);
-    const avg      = parseFloat(applyBtn.dataset.avg);
-    if (!opId || !stdTime) return;
-
-    const op  = state.operations.find(o => o.id === opId);
-    const st  = state.standardTimes.find(s => s.operationId === opId);
-    if (!op) return;
-
-    const obs   = getObs();
-    const perf  = parseFloat(document.getElementById('ts-perf').value)  || 1.0;
-    const allow = parseFloat(document.getElementById('ts-allow').value) || 0.1;
-    const today = new Date().toISOString().slice(0, 10);
-    const prev  = op.standardTime;
-
-    state.timeStudies.forEach(s => { if (s.operationId === opId) s.applied = false; });
-    state.timeStudies.push({
-      operationId:       opId,
-      observations:      obs,
-      performanceFactor: perf,
-      allowanceFactor:   allow,
-      avgTime:           avg,
-      normalTime:        avg * perf,
-      suggestedStdTime:  stdTime,
-      date:              today,
-      applied:           true
+  container.querySelectorAll('[data-ts-subset]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.timeStudySelection.subsetId = btn.dataset.tsSubset;
+      saveState();
+      renderTimeStudy(container);
     });
+  });
 
-    op.standardTime = Math.round(stdTime * 10) / 10;
-    op.isTemporary  = true;
+  container.querySelectorAll('[data-ts-jump]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const [stationId, subsetId] = btn.dataset.tsJump.split(':');
+      state.timeStudySelection.stationId = stationId;
+      state.timeStudySelection.subsetId = subsetId;
+      saveState();
+      renderTimeStudy(container);
+    });
+  });
 
-    if (st) {
-      const parts   = (st.version || 'v1.0').replace('v', '').split('.');
-      st.version    = `v${parts[0]}.${parseInt(parts[1] || '0') + 1}`;
-      st.updatedAt  = today;
-      st.updatedBy  = 'Estudio de Tiempo';
-      st.isTemporary = true;
-    }
+  container.querySelectorAll('.time-study-frequency').forEach(input => {
+    input.addEventListener('input', () => {
+      const activity = subset.actividades.find(item => item.activityId === input.dataset.activityId);
+      if (!activity) return;
+      const value = Math.max(0, parseFloat(input.value) || 0);
+      activity.frequency = Math.round(value * 100) / 100;
+      const tc = calculateActivityTC(activity);
+      const tcEl = container.querySelector(`[data-tc="${activity.activityId}"]`);
+      if (tcEl) tcEl.textContent = fmt(tc, 2);
+      const total = calculateSubsetTotal(subset);
+      const totalEl = container.querySelector('#ts-subset-total');
+      const cardEl = container.querySelector('#ts-subset-total-card');
+      if (totalEl) totalEl.textContent = fmt(total, 2);
+      if (cardEl) cardEl.innerHTML = `${fmt(total, 2)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span>`;
+      saveState();
+    });
+  });
 
-    state.stationAssignments = autoBalanceOperations();
+  container.querySelector('#ts-reset-subset')?.addEventListener('click', () => {
+    subset.actividades.forEach(activity => { activity.frequency = 0; });
     saveState();
-    showToast(`Tiempo actualizado: ${prev} → ${op.standardTime} seg`, 'success');
-    renderTimeStudy(document.getElementById('main-content'));
+    renderTimeStudy(container);
+    showToast(`Frecuencias limpiadas para ${subset.name}`, 'success');
   });
 }
 
@@ -1469,7 +1821,7 @@ function autoBalanceForOps(ops, takt) {
     assignments.push({
       operationId: op.id, station,
       standardTime: op.standardTime,
-      sequence: op.sequence, name: op.name, code: op.code
+      sequence: op.sequence, name: op.name
     });
   });
   return assignments;
@@ -1502,7 +1854,7 @@ function computeScenario(scenario) {
     // Custom redistribution scenario — update standardTimes from modified ops
     assignments = p.customAssignments.map(ca => {
       const op = ops.find(o => o.id === ca.operationId);
-      return op ? { ...ca, standardTime: op.standardTime, name: op.name, code: op.code, sequence: op.sequence } : ca;
+      return op ? { ...ca, standardTime: op.standardTime, name: op.name, sequence: op.sequence } : ca;
     });
   } else {
     assignments = autoBalanceForOps(ops, takt);
@@ -1675,8 +2027,7 @@ function openNewScenarioModal() {
           station: parseInt(sel.value),
           standardTime: op.standardTime,
           sequence: op.sequence,
-          name: op.name,
-          code: op.code
+          name: op.name
         } : null;
       }).filter(Boolean);
     }
@@ -1873,8 +2224,8 @@ function exportReportCSV() {
   const takt = s.takt;
   const BOM = '﻿';
 
-  const headers = ['Estación','Sec.','Código','Operación','Tiempo (s)','Carga Estación (s)','Takt (s)','Estado'];
-  const rows = [headers.join(',')];
+  const rows = ['Resumen de Balanceo'];
+  rows.push(['Estación','No.','Actividad','Tiempo (s)','Carga Estación (s)','Takt (s)','Estado'].map(csvCell).join(','));
 
   const stLoads = s.stationLoads;
   s.assignments.forEach(a => {
@@ -1883,20 +2234,48 @@ function exportReportCSV() {
     rows.push([
       a.station,
       a.sequence,
-      `"${a.code}"`,
-      `"${a.name}"`,
+      csvCell(a.name),
       fmt(a.standardTime, 2),
       fmt(load, 2),
       fmt(takt, 2),
-      status
+      csvCell(status)
     ].join(','));
+  });
+
+  ensureTimeStudyStructure();
+  rows.push('');
+  rows.push('Estudios de Tiempo');
+  rows.push(['Estación','Subconjunto','No.','Actividad','STD','Frecuencia','TC'].map(csvCell).join(','));
+  state.timeStudyStructure.forEach(station => {
+    station.subconjuntos.forEach(subset => {
+      subset.actividades.forEach(activity => {
+        rows.push([
+          csvCell(station.name),
+          csvCell(subset.name),
+          activity.no,
+          csvCell(activity.name),
+          fmt(activity.std, 2),
+          fmt(activity.frequency, 2),
+          fmt(calculateActivityTC(activity), 2)
+        ].join(','));
+      });
+      rows.push([
+        csvCell(station.name),
+        csvCell(subset.name),
+        '',
+        csvCell('Total Subconjunto'),
+        '',
+        '',
+        fmt(calculateSubsetTotal(subset), 2)
+      ].join(','));
+    });
   });
 
   const blob = new Blob([BOM + rows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
   const url  = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href     = url;
-  link.download = `KaiFlow_${state.line.code}_${new Date().toISOString().slice(0,10)}.csv`;
+  link.download = `KaiFlow_${state.line.name.replace(/\s+/g, '_')}_${new Date().toISOString().slice(0,10)}.csv`;
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
@@ -1932,18 +2311,54 @@ function renderReport(container) {
 
   const opRows = s.assignments.map(a => {
     const load    = s.stationLoads[a.station] || 0;
-    const st      = state.standardTimes.find(st => st.operationId === a.operationId);
     return `
       <tr>
         <td style="font-weight:600">Est. ${a.station}</td>
         <td>${a.sequence}</td>
-        <td style="color:var(--text-muted)">${esc(a.code)}</td>
         <td>${esc(a.name)}</td>
         <td class="text-right">${fmt(a.standardTime)}</td>
         <td class="text-right">${fmt(load)}</td>
-        <td style="color:var(--text-muted);font-size:var(--font-12)">${st ? st.version : '—'}</td>
       </tr>`;
   }).join('');
+
+  ensureTimeStudyStructure();
+  const timeStudyReportSections = state.timeStudyStructure.map(station => `
+    <div class="report-time-study-station">
+      <h3>${esc(station.name)} <span>${fmt(calculateStationTimeStudyTotal(station), 2)} seg</span></h3>
+      ${station.subconjuntos.map(subset => `
+        <div class="report-time-study-subset">
+          <div class="report-time-study-title">
+            <strong>Subconjunto: ${esc(subset.name)}</strong>
+            <span>Total: ${fmt(calculateSubsetTotal(subset), 2)} seg</span>
+          </div>
+          <div class="table-wrapper">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th style="width:56px">No.</th>
+                  <th>Actividad</th>
+                  <th class="text-right">STD</th>
+                  <th class="text-right">Frecuencia</th>
+                  <th class="text-right">TC</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${subset.actividades.map(activity => `
+                  <tr>
+                    <td class="font-mono" style="color:var(--text-muted)">${activity.no}</td>
+                    <td>${esc(activity.name)}</td>
+                    <td class="text-right font-mono">${fmt(activity.std, 2)}</td>
+                    <td class="text-right font-mono">${fmt(activity.frequency, 2)}</td>
+                    <td class="text-right font-mono"><strong>${fmt(calculateActivityTC(activity), 2)}</strong></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `).join('');
 
   const scenarioRows = state.scenarios.map(scn => {
     const r = computeScenario(scn);
@@ -1981,12 +2396,12 @@ function renderReport(container) {
     <!-- Report header -->
     <div class="report-header-block">
       <svg width="40" height="40" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="16" cy="16" r="15" stroke="#6AAF3D" stroke-width="2" fill="none"/>
-        <rect x="8" y="20" width="4" height="6" rx="1" fill="#4A7C3F"/>
-        <rect x="14" y="16" width="4" height="10" rx="1" fill="#5A9648"/>
-        <rect x="20" y="12" width="4" height="14" rx="1" fill="#6AAF3D"/>
-        <polyline points="9,18 14,12 20,10 26,8" stroke="#6AAF3D" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-        <circle cx="26" cy="8" r="2" fill="#6AAF3D"/>
+        <circle cx="16" cy="16" r="15" stroke="#D946EF" stroke-width="2" fill="none"/>
+        <rect x="8" y="20" width="4" height="6" rx="1" fill="#7E2CA3"/>
+        <rect x="14" y="16" width="4" height="10" rx="1" fill="#A33BC2"/>
+        <rect x="20" y="12" width="4" height="14" rx="1" fill="#F472B6"/>
+        <polyline points="9,18 14,12 20,10 26,8" stroke="#EC4899" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+        <circle cx="26" cy="8" r="2" fill="#F472B6"/>
       </svg>
       <div class="report-logo-text">
         <h2>KaiFlow — Balanceo de Línea</h2>
@@ -1999,10 +2414,8 @@ function renderReport(container) {
       <div class="report-section-title">Identificación</div>
       <div class="report-meta-grid">
         <div class="report-meta-item"><label>Planta</label><span>${esc(state.plant.name)}</span></div>
-        <div class="report-meta-item"><label>Código planta</label><span>${esc(state.plant.code)}</span></div>
         <div class="report-meta-item"><label>Área</label><span>${esc(state.area.name)}</span></div>
         <div class="report-meta-item"><label>Línea</label><span>${esc(state.line.name)}</span></div>
-        <div class="report-meta-item"><label>Código línea</label><span>${esc(state.line.code)}</span></div>
         <div class="report-meta-item"><label>Proceso</label><span>${esc(state.process.name)}</span></div>
       </div>
     </div>
@@ -2055,6 +2468,12 @@ function renderReport(container) {
       </div>
     </div>
 
+    <!-- Estudios de tiempo -->
+    <div class="report-section">
+      <div class="report-section-title">Estudios de Tiempo por Estación y Subconjunto</div>
+      ${timeStudyReportSections}
+    </div>
+
     <!-- Estaciones -->
     <div class="report-section">
       <div class="report-section-title">Resumen por Estación</div>
@@ -2083,12 +2502,10 @@ function renderReport(container) {
           <thead>
             <tr>
               <th>Estación</th>
-              <th>Seq.</th>
-              <th>Código</th>
-              <th>Operación</th>
-              <th class="text-right">T. Estándar (s)</th>
+              <th>No.</th>
+              <th>Actividad</th>
+              <th class="text-right">STD (s)</th>
               <th class="text-right">Carga Est. (s)</th>
-              <th>Versión</th>
             </tr>
           </thead>
           <tbody>${opRows}</tbody>
@@ -2152,7 +2569,6 @@ function renderPermissions(container) {
       <div class="card p-4">
         <div style="display:flex;align-items:center;gap:var(--sp-3);margin-bottom:var(--sp-3)">
           <span class="role-badge" style="font-size:var(--font-14);padding:4px 14px">${esc(r.name)}</span>
-          <span style="font-size:var(--font-12);color:var(--text-muted)">Código: ${esc(r.code)}</span>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2)">
           <div>
@@ -2278,20 +2694,13 @@ function openOperationModal(opId) {
 
   openModal(op ? 'Editar Operación' : 'Agregar Operación', `
     <div class="form-group">
-      <label class="form-label" for="op-name">Nombre <span style="color:var(--danger)">*</span></label>
+      <label class="form-label" for="op-name">Actividad <span style="color:var(--danger)">*</span></label>
       <input class="form-input w-full" id="op-name" type="text"
-        value="${esc(op?.name ?? '')}" placeholder="Ej. Crimpado de terminales" />
+        value="${esc(op?.name ?? '')}" placeholder="Ej. Colocar etiqueta" />
     </div>
-    <div class="form-row">
-      <div class="form-group">
-        <label class="form-label" for="op-code">Código</label>
-        <input class="form-input" id="op-code" type="text"
-          value="${esc(op?.code ?? '')}" placeholder="Ej. TC-002" />
-      </div>
-      <div class="form-group">
-        <label class="form-label" for="op-seq">Secuencia</label>
-        <input class="form-input" id="op-seq" type="number" min="1" value="${nextSeq}" />
-      </div>
+    <div class="form-group">
+      <label class="form-label" for="op-seq">No.</label>
+      <input class="form-input" id="op-seq" type="number" min="1" value="${nextSeq}" />
     </div>
     <div class="form-group">
       <label class="form-label" for="op-time">Tiempo estándar (seg) <span style="color:var(--danger)">*</span></label>
@@ -2320,7 +2729,6 @@ function openOperationModal(opId) {
 
     if (op) {
       op.name         = name;
-      op.code         = document.getElementById('op-code').value.trim() || op.code;
       op.sequence     = parseInt(document.getElementById('op-seq').value) || op.sequence;
       op.standardTime = time;
       op.active       = document.getElementById('op-active').checked;
@@ -2329,7 +2737,6 @@ function openOperationModal(opId) {
       const newOp = {
         id: generateId('OP'),
         sequence:     parseInt(document.getElementById('op-seq').value) || nextSeq,
-        code:         document.getElementById('op-code').value.trim() || `OP-${String(nextSeq).padStart(3,'0')}`,
         name, standardTime: time, active: true, isTemporary: false
       };
       state.operations.push(newOp);
@@ -2463,7 +2870,7 @@ function openEditTimeModal(opId) {
   openModal(`Editar Tiempo — ${op.name}`, `
     <div style="background:var(--surface-bg);padding:var(--sp-3) var(--sp-4);border-radius:var(--radius-md);margin-bottom:var(--sp-4)">
       <span style="font-size:var(--font-12);color:var(--text-muted)">
-        Código: <strong>${esc(op.code)}</strong> · Versión actual: <strong>${esc(st?.version ?? 'v1.0')}</strong>
+        Actividad No. <strong>${esc(op.sequence)}</strong> · Versión actual: <strong>${esc(st?.version ?? 'v1.0')}</strong>
       </span>
     </div>
     <div class="form-group">
