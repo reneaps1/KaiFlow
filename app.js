@@ -321,6 +321,7 @@ function normalizeTimeStudies() {
       status: normalStatus,
       createdAt: s.createdAt || now,
       updatedAt: s.updatedAt || s.createdAt || now,
+      completedAt: s.completedAt || null,
       steps: (s.steps || []).map(step => {
         // Old format had captures:number + times:[]; new format has requiredCaptures:number + captures:[]
         const hadOldCaptures = typeof step.captures === 'number';
@@ -2041,6 +2042,7 @@ function renderTSRecordsSection(container) {
 
   const rows = studies.map(s => {
     const { done, total } = tsProgressOf(s);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
     const date = s.updatedAt || s.createdAt;
     return `
       <tr>
@@ -2048,7 +2050,10 @@ function renderTSRecordsSection(container) {
         <td style="color:var(--text-muted);font-size:var(--font-13)">${date ? new Date(date).toLocaleDateString('es-MX') : '—'}</td>
         <td class="text-right">${(s.steps || []).length}</td>
         <td>${tsBadgeForStatus(s.status)}</td>
-        <td class="font-mono" style="font-size:var(--font-13)">${done}/${total}</td>
+        <td style="min-width:90px">
+          <div style="font-size:var(--font-12);color:var(--text-muted);margin-bottom:3px">${done}/${total} · ${pct}%</div>
+          <div class="ts-progress-bar"><div class="ts-progress-bar-fill" style="width:${pct}%"></div></div>
+        </td>
         <td>
           <div class="ts-row-actions">
             <button class="btn btn--ghost btn--sm" data-ts-action="view"      data-study-id="${esc(s.id)}" title="Ver detalle">Ver</button>
@@ -2075,7 +2080,7 @@ function renderTSRecordsSection(container) {
               <th style="width:110px">Actualizado</th>
               <th class="text-right" style="width:66px">Pasos</th>
               <th style="width:120px">Estado</th>
-              <th style="width:88px">Progreso</th>
+              <th style="width:110px">Progreso</th>
               <th style="width:240px">Acciones</th>
             </tr>
           </thead>
@@ -2225,71 +2230,254 @@ function openTimeStudyDetailModal(studyId) {
   const study = (state.timeStudies || []).find(s => s.id === studyId);
   if (!study) return;
 
-  const stepRows = (study.steps || []).map((step, i) => {
-    const taken    = (step.captures || []).length;
-    const needed   = step.requiredCaptures || 0;
-    const complete = step.isComplete || taken >= needed;
-    const avg      = step.averageTime != null ? `${fmt(step.averageTime, 2)}s` : '—';
+  const steps = study.steps || [];
+  const { done, total } = tsProgressOf(study);
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const completeSteps = steps.filter(s => s.isComplete).length;
+  const pendingSteps = steps.length - completeSteps;
+  const totalAvg = tsCalculateTotalAvg(study);
+  const createdDate = study.createdAt ? new Date(study.createdAt).toLocaleDateString('es-MX') : '—';
+  const updatedDate = study.updatedAt ? new Date(study.updatedAt).toLocaleDateString('es-MX') : '—';
+  const completedDate = study.completedAt ? new Date(study.completedAt).toLocaleDateString('es-MX') : null;
+  const isCompleted = study.status === 'completed';
+  const canFinalize = !isCompleted && steps.length > 0 && steps.every(s => s.isComplete);
+
+  const stepRows = steps.map((step, i) => {
+    const taken = (step.captures || []).length;
+    const needed = step.requiredCaptures || 0;
+    const isComplete = step.isComplete || taken >= needed;
+    const avg = step.averageTime != null ? fmtMs(step.averageTime) : '—';
+    const stepPct = needed > 0 ? Math.round((taken / needed) * 100) : 0;
     return `
       <tr>
         <td class="font-mono" style="color:var(--text-muted)">${i + 1}</td>
         <td>${esc(step.name)}</td>
         <td class="text-right">${needed}</td>
         <td class="text-right">${taken}</td>
+        <td style="min-width:80px">
+          <div style="font-size:var(--font-12);color:var(--text-muted);margin-bottom:3px">${stepPct}%</div>
+          <div class="ts-progress-bar"><div class="ts-progress-bar-fill" style="width:${stepPct}%"></div></div>
+        </td>
         <td class="text-right font-mono">${avg}</td>
-        <td>${complete
+        <td>${isComplete
           ? '<span class="badge badge--success">Completo</span>'
           : '<span class="badge badge--neutral">Pendiente</span>'}</td>
         <td>
-          <button class="btn ${complete ? 'btn--ghost' : 'btn--primary'} btn--sm"
-            data-ts-open-sw="${esc(study.id)}" data-step-id="${esc(step.id)}">
-            ${complete ? 'Ver capturas' : 'Continuar captura'}
-          </button>
+          <div class="ts-detail-actions">
+            <button class="btn btn--ghost btn--sm" data-ts-action="captures"
+              data-study-id="${esc(study.id)}" data-step-id="${esc(step.id)}">Ver capturas</button>
+            <button class="btn ${isComplete ? 'btn--ghost' : 'btn--primary'} btn--sm"
+              data-ts-action="stopwatch" data-study-id="${esc(study.id)}" data-step-id="${esc(step.id)}">
+              ${isComplete ? 'Continuar' : 'Capturar'}
+            </button>
+            <button class="btn btn--ghost btn--sm ts-btn-danger" data-ts-action="repeat"
+              data-study-id="${esc(study.id)}" data-step-id="${esc(step.id)}"
+              data-step-name="${esc(step.name)}">Repetir</button>
+          </div>
         </td>
       </tr>
     `;
   }).join('');
 
-  const { done, total } = tsProgressOf(study);
-
   openModal(esc(study.name), `
-    <div style="display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin-bottom:var(--sp-4)">
-      ${tsBadgeForStatus(study.status)}
-      <span style="color:var(--text-muted);font-size:var(--font-13)">${(study.steps || []).length} pasos</span>
-      <span style="color:var(--text-muted);font-size:var(--font-13)">Progreso: ${done}/${total}</span>
-      <span style="color:var(--text-muted);font-size:var(--font-13)">Creado: ${study.createdAt ? new Date(study.createdAt).toLocaleDateString('es-MX') : '—'}</span>
+    <div style="padding:var(--sp-5) var(--sp-6)">
+      <div style="display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin-bottom:var(--sp-4)">
+        ${tsBadgeForStatus(study.status)}
+        <span style="color:var(--text-muted);font-size:var(--font-13)">Creado: ${createdDate}</span>
+        <span style="color:var(--text-muted);font-size:var(--font-13)">Actualizado: ${updatedDate}</span>
+        ${completedDate ? `<span style="color:var(--text-muted);font-size:var(--font-13)">Finalizado: ${completedDate}</span>` : ''}
+      </div>
+
+      <div class="ts-detail-summary">
+        <div class="ts-detail-summary-title">Resumen del estudio</div>
+        <div class="ts-detail-summary-grid">
+          <div class="ts-detail-stat">
+            <span class="ts-detail-stat-label">Pasos completos</span>
+            <span class="ts-detail-stat-value ${pendingSteps > 0 ? 'ts-detail-stat-value--warn' : 'ts-detail-stat-value--ok'}">${completeSteps}/${steps.length}</span>
+          </div>
+          <div class="ts-detail-stat">
+            <span class="ts-detail-stat-label">Pasos pendientes</span>
+            <span class="ts-detail-stat-value ${pendingSteps > 0 ? 'ts-detail-stat-value--warn' : ''}">${pendingSteps}</span>
+          </div>
+          <div class="ts-detail-stat">
+            <span class="ts-detail-stat-label">Capturas tomadas</span>
+            <span class="ts-detail-stat-value">${done}/${total}</span>
+          </div>
+          <div class="ts-detail-stat">
+            <span class="ts-detail-stat-label">Promedio total</span>
+            <span class="ts-detail-stat-value font-mono">${totalAvg != null ? fmtMs(totalAvg) : '—'}</span>
+          </div>
+        </div>
+        <div class="ts-progress-bar-wrap">
+          <div class="ts-progress-bar-label">
+            <span>Progreso general</span>
+            <span>${done}/${total} capturas · ${pct}%</span>
+          </div>
+          <div class="ts-progress-bar"><div class="ts-progress-bar-fill" style="width:${pct}%"></div></div>
+        </div>
+      </div>
+
+      <div style="overflow-x:auto;margin-bottom:var(--sp-5)">
+        <table class="time-study-table">
+          <thead>
+            <tr>
+              <th style="width:40px">No.</th>
+              <th>Paso</th>
+              <th class="text-right" style="width:80px">Requerid.</th>
+              <th class="text-right" style="width:70px">Tomadas</th>
+              <th style="width:90px">Progreso</th>
+              <th class="text-right" style="width:90px">Promedio</th>
+              <th style="width:90px">Estado</th>
+              <th style="min-width:220px">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>${stepRows || '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Sin pasos</td></tr>'}</tbody>
+        </table>
+      </div>
+
+      <div class="modal-actions" style="margin-top:0">
+        <button class="btn btn--ghost" id="tsd-close">Cerrar</button>
+        ${isCompleted
+          ? '<button class="btn btn--secondary" id="tsd-reopen">Reabrir estudio</button>'
+          : `<button class="btn btn--primary" id="tsd-finalize"
+               ${canFinalize ? '' : 'disabled'}
+               title="${canFinalize ? 'Finalizar el estudio de tiempo' : 'Completa todos los pasos para poder finalizar'}">
+               Finalizar estudio
+             </button>`
+        }
+      </div>
     </div>
-    <div style="overflow-x:auto">
-      <table class="time-study-table">
-        <thead>
-          <tr>
-            <th style="width:40px">No.</th>
-            <th>Paso</th>
-            <th class="text-right" style="width:90px">Requeridas</th>
-            <th class="text-right" style="width:80px">Tomadas</th>
-            <th class="text-right" style="width:90px">Promedio</th>
-            <th style="width:100px">Estado</th>
-            <th style="width:150px"></th>
-          </tr>
-        </thead>
-        <tbody>${stepRows || '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Sin pasos</td></tr>'}</tbody>
-      </table>
-    </div>
-    <div class="modal-actions" style="margin-top:var(--sp-5)">
-      <button class="btn btn--ghost" id="tsd-close">Cerrar</button>
-    </div>
-  `);
+  `, 'modal-box--xl');
 
   document.getElementById('tsd-close')?.addEventListener('click', closeModal);
 
-  document.querySelectorAll('[data-ts-open-sw]').forEach(btn => {
+  if (isCompleted) {
+    document.getElementById('tsd-reopen')?.addEventListener('click', () => {
+      showConfirm(
+        'Reabrir estudio',
+        '¿Deseas reabrir este estudio? El estado cambiará a En progreso y podrás continuar o repetir pasos.',
+        () => {
+          tsReopenStudy(studyId);
+          closeModal();
+          showToast('Estudio reabierto', 'success');
+          renderPage('timeStudy');
+        }
+      );
+    });
+  } else {
+    document.getElementById('tsd-finalize')?.addEventListener('click', () => {
+      if (!canFinalize) return;
+      const incomplete = steps.filter(s => !s.isComplete);
+      if (incomplete.length > 0) {
+        showToast(`No puedes finalizar. Aún hay ${incomplete.length} paso(s) incompleto(s).`, 'warning');
+        return;
+      }
+      showConfirm(
+        'Finalizar estudio',
+        '¿Confirmas finalizar este estudio de tiempo? Después podrás consultarlo desde Registros.',
+        () => {
+          if (tsFinalizeStudy(studyId)) {
+            closeModal();
+            showToast('Estudio finalizado exitosamente', 'success');
+            renderPage('timeStudy');
+          }
+        }
+      );
+    });
+  }
+
+  document.querySelectorAll('[data-ts-action]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const sid = btn.dataset.tsOpenSw;
+      const action = btn.dataset.tsAction;
+      const sid = btn.dataset.studyId;
       const pid = btn.dataset.stepId;
-      closeModal();
-      openStopwatchModal(sid, pid);
+      if (action === 'stopwatch') {
+        closeModal();
+        openStopwatchModal(sid, pid);
+      } else if (action === 'captures') {
+        openStepCapturesModal(sid, pid);
+      } else if (action === 'repeat') {
+        const stepName = btn.dataset.stepName;
+        showConfirm(
+          'Repetir paso',
+          `¿Deseas repetir el paso "${stepName}"? Se eliminarán todas sus capturas actuales.`,
+          () => {
+            tsRepeatStep(sid, pid);
+            showToast(`Capturas de "${stepName}" eliminadas`, 'info');
+            openTimeStudyDetailModal(studyId);
+          }
+        );
+      }
     });
   });
+}
+
+function openStepCapturesModal(studyId, stepId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return;
+  const step = tsGetStep(study, stepId);
+  if (!step) return;
+
+  const captures = step.captures || [];
+  const avg = step.averageTime;
+  const min = captures.length > 0 ? Math.min(...captures.map(c => c.valueMs)) : null;
+  const max = captures.length > 0 ? Math.max(...captures.map(c => c.valueMs)) : null;
+  const diff = (min != null && max != null) ? max - min : null;
+
+  const rows = captures.length > 0
+    ? captures.map((c, i) => `
+        <tr>
+          <td class="font-mono" style="color:var(--text-muted)">${i + 1}</td>
+          <td>${esc(c.label || `Tiempo ${i + 1}`)}</td>
+          <td class="text-right font-mono">${fmtMs(c.valueMs)}</td>
+          <td class="text-right" style="color:var(--text-muted);font-size:var(--font-13)">${c.createdAt ? new Date(c.createdAt).toLocaleString('es-MX') : '—'}</td>
+        </tr>
+      `).join('')
+    : `<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:var(--sp-5)">Sin capturas registradas</td></tr>`;
+
+  openModal(`Capturas · ${esc(step.name)}`, `
+    <div style="padding:var(--sp-5) var(--sp-6)">
+      <div style="color:var(--text-muted);font-size:var(--font-13);margin-bottom:var(--sp-4)">${esc(study.name)}</div>
+      <div class="ts-capture-stats">
+        <div class="ts-capture-stat">
+          <span class="ts-capture-stat-label">Promedio</span>
+          <span class="ts-capture-stat-value">${avg != null ? fmtMs(avg) : '—'}</span>
+        </div>
+        <div class="ts-capture-stat">
+          <span class="ts-capture-stat-label">Mínimo</span>
+          <span class="ts-capture-stat-value">${min != null ? fmtMs(min) : '—'}</span>
+        </div>
+        <div class="ts-capture-stat">
+          <span class="ts-capture-stat-label">Máximo</span>
+          <span class="ts-capture-stat-value">${max != null ? fmtMs(max) : '—'}</span>
+        </div>
+        <div class="ts-capture-stat">
+          <span class="ts-capture-stat-label">Diferencia</span>
+          <span class="ts-capture-stat-value">${diff != null ? fmtMs(diff) : '—'}</span>
+        </div>
+      </div>
+      <div style="overflow-x:auto;margin-bottom:var(--sp-5)">
+        <table class="time-study-table">
+          <thead>
+            <tr>
+              <th style="width:40px">No.</th>
+              <th>Captura</th>
+              <th class="text-right" style="width:100px">Tiempo</th>
+              <th class="text-right" style="width:160px">Fecha/Hora</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="modal-actions" style="margin-top:0">
+        <button class="btn btn--ghost" id="tssc-back">← Volver al detalle</button>
+        <button class="btn btn--ghost" id="tssc-close">Cerrar</button>
+      </div>
+    </div>
+  `, 'modal-box--xl');
+
+  document.getElementById('tssc-close')?.addEventListener('click', closeModal);
+  document.getElementById('tssc-back')?.addEventListener('click', () => openTimeStudyDetailModal(studyId));
 }
 
 function openEditTimeStudyModal(studyId, onSave) {
@@ -2475,10 +2663,16 @@ function tsRecalcStep(step) {
 
 function tsUpdateStudyStatus(study) {
   const steps = study.steps || [];
-  if (steps.length === 0) { study.status = 'draft'; return; }
+  if (steps.length === 0) { study.status = 'draft'; study.completedAt = null; return; }
   const totalCaptures = steps.reduce((sum, s) => sum + (s.captures || []).length, 0);
-  if (totalCaptures === 0) { study.status = 'draft'; return; }
-  study.status = steps.every(s => s.isComplete) ? 'completed' : 'in_progress';
+  if (totalCaptures === 0) { study.status = 'draft'; study.completedAt = null; return; }
+  const allComplete = steps.every(s => s.isComplete);
+  if (study.status === 'completed' && !allComplete) {
+    study.status = 'in_progress';
+    study.completedAt = null;
+  } else if (study.status !== 'completed') {
+    study.status = 'in_progress';
+  }
 }
 
 function tsAddCapture(studyId, stepId, valueMs) {
@@ -2509,6 +2703,49 @@ function tsDiscardLastCapture(studyId, stepId) {
   step.captures.pop();
   tsRecalcStep(step);
   tsUpdateStudyStatus(study);
+  study.updatedAt = new Date().toISOString();
+  saveState();
+  return true;
+}
+
+// ── Time Study: Phase 4 helpers ───────────────
+function tsCalculateTotalAvg(study) {
+  const stepsWithAvg = (study.steps || []).filter(s => s.isComplete && s.averageTime != null);
+  if (stepsWithAvg.length === 0) return null;
+  return stepsWithAvg.reduce((sum, s) => sum + s.averageTime, 0) / stepsWithAvg.length;
+}
+
+function tsRepeatStep(studyId, stepId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return false;
+  const step = tsGetStep(study, stepId);
+  if (!step) return false;
+  step.captures = [];
+  step.averageTime = null;
+  step.isComplete = false;
+  tsUpdateStudyStatus(study);
+  study.updatedAt = new Date().toISOString();
+  saveState();
+  return true;
+}
+
+function tsFinalizeStudy(studyId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return false;
+  if (!(study.steps || []).every(s => s.isComplete)) return false;
+  const now = new Date().toISOString();
+  study.status = 'completed';
+  study.completedAt = now;
+  study.updatedAt = now;
+  saveState();
+  return true;
+}
+
+function tsReopenStudy(studyId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return false;
+  study.status = 'in_progress';
+  study.completedAt = null;
   study.updatedAt = new Date().toISOString();
   saveState();
   return true;
@@ -4483,14 +4720,18 @@ function showConfirm(title, body, onOk) {
 }
 
 // ── Modal ─────────────────────────────────────
-function openModal(title, bodyHTML) {
+function openModal(title, bodyHTML, extraClass = '') {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-body').innerHTML    = bodyHTML;
+  const box = document.querySelector('#modal-backdrop .modal-box');
+  if (box) box.className = ['modal-box modal-box--lg', extraClass].filter(Boolean).join(' ');
   document.getElementById('modal-backdrop').classList.remove('hidden');
 }
 
 function closeModal() {
   document.getElementById('modal-backdrop').classList.add('hidden');
+  const box = document.querySelector('#modal-backdrop .modal-box');
+  if (box) box.className = 'modal-box modal-box--lg';
 }
 
 // ── HTML Escape ───────────────────────────────
