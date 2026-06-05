@@ -215,12 +215,14 @@ function resetState() {
     '¿Deseas restaurar todos los datos al estado original? Los cambios de esta sesión se perderán.',
     () => {
       localStorage.removeItem(STORAGE_KEY);
+      writeCatalogStore({});
+      writeChangeDatabaseLog([]);
       state = deepClone(DEFAULT_STATE);
       state.stationAssignments = autoBalanceOperations(state);
       ensureDashboardState();
       saveState();
       renderApp();
-      showToast('Datos restaurados al estado original', 'success');
+      showToast('Sistema limpiado. Listo para iniciar captura.', 'success');
     }
   );
 }
@@ -921,7 +923,7 @@ function computeSummary(s) {
 // ── Router / Navigation ────────────────────────
 const PAGE_LABELS = {
   dashboard:     'Dashboard',
-  catalogs:      'Catálogos',
+  catalogs:      'Captura',
   changeDatabase:'Base de Datos de Cambios',
   standardTimes: 'Tiempos Estándar',
   timeStudy:     'Estudios de Tiempo',
@@ -1281,6 +1283,12 @@ function renderCatalogActivityRow(station, operator, activity, index) {
   `;
 }
 
+function getSubconjuntoOptions() {
+  return [...new Set(
+    (state.timeStudyStructure || []).flatMap(s => (s.subconjuntos || []).map(sc => sc.name))
+  )];
+}
+
 function renderCatalogOperator(station, operator, index) {
   const actividades = Array.isArray(operator.actividades) ? operator.actividades : [];
   const rows = actividades.length
@@ -1308,13 +1316,18 @@ function renderCatalogOperator(station, operator, index) {
             <input
               class="form-input catalog-subset-input"
               id="catalog-subset-${esc(operator.id)}"
+              list="dl-subconjunto-${esc(operator.id)}"
               data-catalog-action="operator-subset"
               data-station-id="${esc(station.id)}"
               data-operator-id="${esc(operator.id)}"
               type="text"
               value="${esc(operator.subconjunto || '')}"
               placeholder="Ej. SGD_Q500"
+              autocomplete="off"
             />
+            <datalist id="dl-subconjunto-${esc(operator.id)}">
+              ${getSubconjuntoOptions().map(name => `<option value="${esc(name)}"></option>`).join('')}
+            </datalist>
           </div>
         </div>
         <div class="catalog-operator-actions">
@@ -1852,8 +1865,6 @@ function renderStandardTimes(container) {
               <th style="width:44px">#</th>
               <th>Nombre de Operación</th>
               <th style="width:110px">Tiempo (s)</th>
-              <th style="width:150px">% del Takt</th>
-              <th style="width:80px">Versión</th>
               <th style="width:80px">Estado</th>
               <th style="width:115px">Fecha Efectiva</th>
               <th>Actualizado por</th>
@@ -1877,15 +1888,6 @@ function renderStandardTimes(container) {
                     <strong class="font-mono" style="${overTakt ? 'color:var(--danger)' : ''}">${op.standardTime}</strong>
                     ${overTakt ? '<span class="badge badge--danger" style="margin-left:4px;font-size:10px">⚠</span>' : ''}
                   </td>
-                  <td>
-                    <div style="display:flex;align-items:center;gap:6px">
-                      <div class="takt-bar-bg">
-                        <div class="takt-bar-fill ${overTakt ? 'takt-bar-fill--over' : ''}" style="width:${Math.min(pct,100)}%"></div>
-                      </div>
-                      <span class="font-mono" style="font-size:var(--font-12);min-width:36px;color:${overTakt ? 'var(--danger)' : 'var(--text-secondary)'}">${pct}%</span>
-                    </div>
-                  </td>
-                  <td><span class="badge badge--neutral">${esc(st.version ?? 'v1.0')}</span></td>
                   <td>
                     ${(st.status ?? 'active') === 'active'
                       ? '<span class="badge badge--success">Activo</span>'
@@ -3512,7 +3514,7 @@ function renderReport(container) {
 
 function renderPermissions(container) {
   const permsConfig = [
-    { key: 'editCatalogs',     label: 'Editar Catálogos' },
+    { key: 'editCatalogs',     label: 'Editar Captura' },
     { key: 'editStandardTimes',label: 'Editar Tiempos Estándar' },
     { key: 'runBalance',       label: 'Ejecutar Balanceo' },
     { key: 'approveBalance',   label: 'Aprobar Balance' },
