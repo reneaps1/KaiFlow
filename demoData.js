@@ -97,6 +97,7 @@ const DEFAULT_STATE = {
   standardTimes: [],
 
   timeStudies: [],
+  timeStudyTab: 'capture',
   timeStudySelection: { stationId: null, subsetId: null },
   timeStudyStructure: [],
 

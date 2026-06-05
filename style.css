@@ -1506,6 +1506,98 @@ tbody tr.row--inactive:hover { opacity: 0.7; }
   .time-study-selector { grid-template-columns: 1fr; }
 }
 
+/* ── Time Study: tab navigation ── */
+.ts-tabs {
+  display: flex;
+  gap: var(--sp-1);
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 0;
+}
+
+.ts-tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  padding: var(--sp-2) var(--sp-4);
+  font-family: var(--font);
+  font-size: var(--font-14, 0.875rem);
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.ts-tab-btn:hover { color: var(--text-primary); }
+
+.ts-tab-btn.active {
+  color: var(--green-700, #15803d);
+  border-bottom-color: var(--green-600, #16a34a);
+  font-weight: 600;
+}
+
+/* ── Time Study: empty state ── */
+.ts-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-12, 3rem) var(--sp-6);
+  text-align: center;
+  color: var(--text-muted);
+  gap: var(--sp-2);
+}
+
+.ts-empty-state-icon {
+  font-size: 2rem;
+  color: var(--border);
+  margin-bottom: var(--sp-2);
+}
+
+.ts-empty-state-title {
+  font-size: var(--font-16, 1rem);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.ts-empty-state-body {
+  font-size: var(--font-14, 0.875rem);
+}
+
+/* ── Time Study: creator modal ── */
+.ts-creator-form { display: flex; flex-direction: column; gap: var(--sp-5); }
+
+.ts-step-header {
+  display: grid;
+  grid-template-columns: 28px 1fr 80px 32px 100px;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-1) var(--sp-1);
+  font-size: var(--font-12, 0.75rem);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ts-step-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 80px 32px 100px;
+  gap: var(--sp-2);
+  align-items: center;
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ts-step-row:last-child { border-bottom: 0; }
+
+.ts-step-num {
+  font-size: var(--font-13, 0.8125rem);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 /* ── Balance: station chips ── */
 .station-chips {
   display: flex;

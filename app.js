@@ -1915,6 +1915,223 @@ function renderStandardTimes(container) {
 }
 
 function renderTimeStudy(container) {
+  const tab = state.timeStudyTab || 'capture';
+  container.innerHTML = `
+    <div class="page-header">
+      <h1 class="page-title">Estudios de Tiempo</h1>
+      <p class="page-subtitle">Toma y análisis de tiempos por operación · ${esc(state.line.name)}</p>
+    </div>
+    <div class="ts-tabs mb-6">
+      <button class="ts-tab-btn ${tab === 'capture' ? 'active' : ''}" data-ts-tab="capture">Toma de tiempos</button>
+      <button class="ts-tab-btn ${tab === 'records' ? 'active' : ''}" data-ts-tab="records">Registros de estudios</button>
+      <button class="ts-tab-btn ${tab === 'frequency' ? 'active' : ''}" data-ts-tab="frequency">Análisis de frecuencias</button>
+    </div>
+    <div id="ts-tab-content"></div>
+  `;
+
+  container.querySelectorAll('[data-ts-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.timeStudyTab = btn.dataset.tsTab;
+      saveState();
+      renderTimeStudy(container);
+    });
+  });
+
+  const content = container.querySelector('#ts-tab-content');
+  if (tab === 'capture') renderTSCaptureSection(content);
+  else if (tab === 'records') renderTSRecordsSection(content);
+  else renderTSFrequencySection(content);
+}
+
+function renderTSCaptureSection(container) {
+  container.innerHTML = `
+    <div class="card mb-6">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Toma de tiempos</div>
+          <div class="card-subtitle">Define los pasos de la operación y captura tiempos con cronómetro</div>
+        </div>
+        <button class="btn btn--primary" id="btn-new-time-study">+ Nuevo estudio</button>
+      </div>
+      <div class="card-body">
+        <p style="color:var(--text-muted);font-size:var(--font-14);line-height:1.6">
+          Crea un estudio de tiempo definiendo los pasos de la operación y el número de capturas por paso.
+          El sistema te guiará para cronometrar cada captura y calculará el promedio automáticamente.
+        </p>
+      </div>
+    </div>
+  `;
+
+  container.querySelector('#btn-new-time-study')?.addEventListener('click', openNewTimeStudyModal);
+}
+
+function renderTSRecordsSection(container) {
+  const studies = state.timeStudies || [];
+
+  if (studies.length === 0) {
+    container.innerHTML = `
+      <div class="ts-empty-state">
+        <div class="ts-empty-state-icon">[ ]</div>
+        <div class="ts-empty-state-title">Aún no hay estudios de tiempo guardados.</div>
+        <div class="ts-empty-state-body">Crea tu primer estudio desde la pestaña <strong>Toma de tiempos</strong>.</div>
+      </div>
+    `;
+    return;
+  }
+
+  const rows = studies.map(s => `
+    <tr>
+      <td>${esc(s.name)}</td>
+      <td>${s.steps ? s.steps.length : 0}</td>
+      <td><span class="badge badge--neutral">${esc(s.status || 'borrador')}</span></td>
+      <td style="color:var(--text-muted);font-size:var(--font-13)">${s.createdAt ? new Date(s.createdAt).toLocaleDateString('es-MX') : '—'}</td>
+    </tr>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Estudios guardados</div>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="time-study-table">
+          <thead>
+            <tr>
+              <th>Nombre</th>
+              <th style="width:80px">Pasos</th>
+              <th style="width:120px">Estado</th>
+              <th style="width:140px">Fecha</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function openNewTimeStudyModal() {
+  let steps = [{ id: generateId('STP'), name: '', captures: 3 }];
+
+  function buildStepsHTML() {
+    return steps.map((step, i) => `
+      <div class="ts-step-row" data-step-idx="${i}">
+        <span class="ts-step-num">${i + 1}</span>
+        <input class="form-input ts-step-name" type="text" placeholder="Nombre del paso"
+          value="${esc(step.name)}" data-step-idx="${i}" />
+        <input class="form-input ts-step-captures" type="number" min="1" step="1"
+          value="${step.captures}" data-step-idx="${i}" style="width:80px;text-align:right" />
+        <button class="btn btn--ghost btn--sm ts-step-remove" data-step-idx="${i}"
+          ${steps.length === 1 ? 'disabled' : ''} title="Eliminar paso">&times;</button>
+        <button class="btn btn--ghost btn--sm" data-step-idx="${i}" disabled
+          title="Disponible en la siguiente fase">Cronómetro</button>
+      </div>
+    `).join('');
+  }
+
+  function refreshStepsList() {
+    const list = document.getElementById('tsc-steps-list');
+    if (!list) return;
+    list.innerHTML = buildStepsHTML();
+
+    list.querySelectorAll('.ts-step-name').forEach(input => {
+      input.addEventListener('input', () => {
+        steps[parseInt(input.dataset.stepIdx)].name = input.value;
+      });
+    });
+
+    list.querySelectorAll('.ts-step-captures').forEach(input => {
+      input.addEventListener('change', () => {
+        const val = Math.max(1, parseInt(input.value) || 1);
+        steps[parseInt(input.dataset.stepIdx)].captures = val;
+        input.value = val;
+      });
+    });
+
+    list.querySelectorAll('.ts-step-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.stepIdx);
+        if (steps.length > 1) {
+          steps.splice(idx, 1);
+          refreshStepsList();
+        }
+      });
+    });
+  }
+
+  openModal('Nuevo estudio de tiempo', `
+    <div class="ts-creator-form">
+      <div class="form-group">
+        <label class="form-label" for="tsc-name">Nombre del estudio <span style="color:var(--danger)">*</span></label>
+        <input class="form-input w-full" id="tsc-name" type="text" placeholder="Ej. Ensamble conector A" />
+      </div>
+
+      <div class="form-group">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--sp-2)">
+          <label class="form-label" style="margin:0">Pasos / Operaciones <span style="color:var(--danger)">*</span></label>
+          <button class="btn btn--ghost btn--sm" id="tsc-add-step">+ Agregar paso</button>
+        </div>
+        <div class="ts-step-header">
+          <span></span>
+          <span>Nombre del paso</span>
+          <span style="text-align:right">Capturas</span>
+          <span></span>
+          <span></span>
+        </div>
+        <div id="tsc-steps-list"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn--ghost" id="tsc-cancel">Cancelar</button>
+        <button class="btn btn--primary" id="tsc-save">Crear estudio</button>
+      </div>
+    </div>
+  `);
+
+  refreshStepsList();
+
+  document.getElementById('tsc-cancel')?.addEventListener('click', closeModal);
+
+  document.getElementById('tsc-add-step')?.addEventListener('click', () => {
+    steps.push({ id: generateId('STP'), name: '', captures: 3 });
+    refreshStepsList();
+  });
+
+  document.getElementById('tsc-save')?.addEventListener('click', () => {
+    const nameEl = document.getElementById('tsc-name');
+    const name = nameEl ? nameEl.value.trim() : '';
+    if (!name) { showToast('El nombre del estudio es requerido', 'warning'); return; }
+    if (steps.length === 0) { showToast('Agrega al menos un paso', 'warning'); return; }
+    const stepWithoutName = steps.find(s => !s.name.trim());
+    if (stepWithoutName) { showToast('Todos los pasos deben tener nombre', 'warning'); return; }
+    const stepBadCaptures = steps.find(s => s.captures < 1);
+    if (stepBadCaptures) { showToast('Cada paso debe tener al menos 1 captura', 'warning'); return; }
+
+    const study = {
+      id: generateId('TST'),
+      name,
+      createdAt: new Date().toISOString(),
+      status: 'borrador',
+      steps: steps.map(s => ({
+        id: s.id,
+        name: s.name.trim(),
+        captures: s.captures,
+        times: [],
+        average: null
+      }))
+    };
+
+    if (!Array.isArray(state.timeStudies)) state.timeStudies = [];
+    state.timeStudies.push(study);
+    state.timeStudyTab = 'records';
+    saveState();
+    closeModal();
+    showToast(`Estudio "${name}" creado`, 'success');
+    renderPage('timeStudy');
+  });
+}
+
+function renderTSFrequencySection(container) {
   ensureTimeStudyStructure();
   const { station, subset } = getSelectedTimeStudyContext();
   const stationTotal = calculateStationTimeStudyTotal(station);
@@ -1935,11 +2152,6 @@ function renderTimeStudy(container) {
   `).join('');
 
   container.innerHTML = `
-    <div class="page-header">
-      <h1 class="page-title">Estudios de Tiempo</h1>
-      <p class="page-subtitle">Catálogo de actividades por estación y subconjunto · ${esc(state.line.name)}</p>
-    </div>
-
     <div class="entity-grid mb-6" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
       <div class="entity-card">
         <div class="entity-card-label">Estación seleccionada</div>
@@ -2091,7 +2303,7 @@ function renderTimeStudy(container) {
       state.timeStudySelection.stationId = nextStation.id;
       state.timeStudySelection.subsetId = nextStation.subconjuntos[0]?.id;
       saveState();
-      renderTimeStudy(container);
+      renderTSFrequencySection(container);
     });
   });
 
@@ -2099,7 +2311,7 @@ function renderTimeStudy(container) {
     btn.addEventListener('click', () => {
       state.timeStudySelection.subsetId = btn.dataset.tsSubset;
       saveState();
-      renderTimeStudy(container);
+      renderTSFrequencySection(container);
     });
   });
 
@@ -2109,7 +2321,7 @@ function renderTimeStudy(container) {
       state.timeStudySelection.stationId = stationId;
       state.timeStudySelection.subsetId = subsetId;
       saveState();
-      renderTimeStudy(container);
+      renderTSFrequencySection(container);
     });
   });
 
@@ -2134,7 +2346,7 @@ function renderTimeStudy(container) {
   container.querySelector('#ts-reset-subset')?.addEventListener('click', () => {
     subset.actividades.forEach(activity => { activity.frequency = 0; });
     saveState();
-    renderTimeStudy(container);
+    renderTSFrequencySection(container);
     showToast(`Frecuencias limpiadas para ${subset.name}`, 'success');
   });
 }
