@@ -12,6 +12,13 @@ let state = null;
 let _redistribActive = false;
 let _redistribAssignments = null;
 
+// Catalog editor draft (discarded when leaving Catálogo)
+let _catalogDraft = null;
+let _catalogDraftKey = null;
+let _catalogCreatedInitial = false;
+let _catalogOpenStationIds = new Set();
+let _activeUser = null;
+
 const DASHBOARD_LINES_BY_AREA = {
   Interior: [
     'SUB ENSAMBLE 1',
@@ -39,7 +46,24 @@ const DASHBOARD_LINES_BY_AREA = {
 
 const DASHBOARD_DEFAULT_AREA = 'Interior';
 const DASHBOARD_DEFAULT_LINE = 'SUB ENSAMBLE 1';
-const DASHBOARD_PERIOD_SECONDS = { Hora: 3600, Turno: 28800 };
+const DASHBOARD_SHIFT_CONFIG = {
+  'Turno 1': { hours: 8, seconds: 28800 },
+  'Turno 2': { hours: 9, seconds: 32400 },
+  'Turno 3': { hours: 7, seconds: 25200 }
+};
+const DASHBOARD_DEFAULT_SHIFT = 'Turno 1';
+const DASHBOARD_DEFAULT_EFFICIENCY = 99;
+const DASHBOARD_DEFAULT_GRAPH_BY = 'station';
+const DASHBOARD_CONFIG_STORAGE_KEY = 'dashboardConfigByLine';
+const CATALOG_DATA_STORAGE_KEY = 'catalogDataByLine';
+const CATALOG_PLANT_NAME = 'Fujikura Puebla';
+const ACTIVE_USER_STORAGE_KEY = 'kaiflowActiveUser';
+const CHANGE_DATABASE_STORAGE_KEY = 'changeDatabaseLog';
+const LOCAL_AUTH_USERS = [
+  { username: 'admin', password: '1234', displayName: 'Administrador' },
+  { username: 'supervisor', password: '1234', displayName: 'Supervisor' },
+  { username: 'ingeniero', password: '1234', displayName: 'Ingeniero' }
+];
 
 function loadState() {
   try {
@@ -48,6 +72,7 @@ function loadState() {
   } catch {
     state = deepClone(DEFAULT_STATE);
   }
+  _activeUser = readActiveUser();
   const catalogMigrated = normalizeManufacturingCatalog();
   ensureTimeStudyStructure();
   const hashPage = window.location.hash.replace('#', '');
@@ -66,6 +91,122 @@ function saveState() {
   } catch {
     showToast('No se pudo guardar el estado en localStorage', 'warning');
   }
+}
+
+function readActiveUser() {
+  try {
+    const raw = localStorage.getItem(ACTIVE_USER_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (!parsed.username || !parsed.displayName) return null;
+    const localUser = LOCAL_AUTH_USERS.find(user => user.username === String(parsed.username));
+    if (!localUser) return null;
+    return {
+      username: localUser.username,
+      displayName: localUser.displayName
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getActiveUser() {
+  if (_activeUser) return _activeUser;
+  _activeUser = readActiveUser();
+  return _activeUser;
+}
+
+function setActiveUser(user) {
+  _activeUser = {
+    username: user.username,
+    displayName: user.displayName
+  };
+  localStorage.setItem(ACTIVE_USER_STORAGE_KEY, JSON.stringify(_activeUser));
+}
+
+function clearActiveUser() {
+  _activeUser = null;
+  localStorage.removeItem(ACTIVE_USER_STORAGE_KEY);
+}
+
+function findLocalUser(username, password) {
+  const normalizedUsername = String(username || '').trim().toLowerCase();
+  const normalizedPassword = String(password || '');
+  return LOCAL_AUTH_USERS.find(user =>
+    user.username === normalizedUsername &&
+    user.password === normalizedPassword
+  ) || null;
+}
+
+function renderAuthWidget() {
+  const container = document.getElementById('auth-widget');
+  if (!container) return;
+  const user = getActiveUser();
+
+  if (user) {
+    container.innerHTML = `
+      <div class="auth-session">
+        <span class="auth-user-label">Usuario: <strong>${esc(user.displayName)}</strong></span>
+        <button class="btn btn--ghost btn--sm" id="auth-logout" type="button">Cerrar sesión</button>
+      </div>
+    `;
+    container.querySelector('#auth-logout')?.addEventListener('click', () => {
+      clearActiveUser();
+      renderAuthWidget();
+      showToast('Sesión cerrada', 'success');
+    });
+    return;
+  }
+
+  container.innerHTML = `
+    <button class="btn btn--secondary btn--sm" id="auth-open-login" type="button">Iniciar sesión</button>
+  `;
+  container.querySelector('#auth-open-login')?.addEventListener('click', () => openLoginModal());
+}
+
+function openLoginModal(message = '') {
+  openModal('Iniciar sesión', `
+    <form class="login-form" id="login-form">
+      <div class="form-group">
+        <label class="form-label" for="login-username">Usuario</label>
+        <input class="form-input w-full" id="login-username" type="text" autocomplete="username" />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="login-password">Contraseña</label>
+        <input class="form-input w-full" id="login-password" type="password" autocomplete="current-password" />
+      </div>
+      <div class="login-error ${message ? '' : 'hidden'}" id="login-error">${esc(message)}</div>
+      <div class="modal-actions">
+        <button class="btn btn--ghost" id="login-cancel" type="button">Cancelar</button>
+        <button class="btn btn--primary" type="submit">Iniciar sesión</button>
+      </div>
+    </form>
+  `);
+
+  const form = document.getElementById('login-form');
+  const usernameEl = document.getElementById('login-username');
+  const passwordEl = document.getElementById('login-password');
+  const errorEl = document.getElementById('login-error');
+
+  document.getElementById('login-cancel')?.addEventListener('click', closeModal);
+  usernameEl?.focus();
+
+  form?.addEventListener('submit', event => {
+    event.preventDefault();
+    const user = findLocalUser(usernameEl.value, passwordEl.value);
+    if (!user) {
+      errorEl.textContent = 'Usuario o contraseña incorrectos.';
+      errorEl.classList.remove('hidden');
+      passwordEl.value = '';
+      passwordEl.focus();
+      return;
+    }
+
+    setActiveUser(user);
+    closeModal();
+    renderAuthWidget();
+    showToast(`Sesión iniciada: ${user.displayName}`, 'success');
+  });
 }
 
 function resetState() {
@@ -199,17 +340,344 @@ function csvCell(value) {
 }
 
 function dashboardLineKey(area, line) {
-  return `${area}||${line}`;
+  return `${area}::${line}`;
+}
+
+function catalogLineKey(area, line) {
+  return `${area}::${line}`;
+}
+
+function readCatalogStore() {
+  try {
+    const raw = localStorage.getItem(CATALOG_DATA_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCatalogStore(store) {
+  try {
+    localStorage.setItem(CATALOG_DATA_STORAGE_KEY, JSON.stringify(store || {}));
+  } catch {
+    showToast('No se pudo guardar el catálogo en localStorage', 'warning');
+  }
+}
+
+function getCatalogDashboardContext() {
+  ensureDashboardState();
+  return {
+    planta: CATALOG_PLANT_NAME,
+    area: state.dashboardSelection?.area || DASHBOARD_DEFAULT_AREA,
+    linea: state.dashboardSelection?.line || DASHBOARD_DEFAULT_LINE
+  };
+}
+
+function createEmptyCatalog(area, line) {
+  return {
+    planta: CATALOG_PLANT_NAME,
+    area,
+    linea: line,
+    estaciones: [
+      {
+        id: 'station-1',
+        nombre: 'Estación 1',
+        operadores: []
+      }
+    ]
+  };
+}
+
+function normalizeCatalogActivity(activity, index) {
+  return {
+    id: activity.id || generateId('CAT-ACT'),
+    no: index + 1,
+    actividad: activity.actividad ?? activity.name ?? activity.nombre ?? '',
+    tiempo: activity.tiempo ?? activity.time ?? activity.standardTime ?? ''
+  };
+}
+
+function normalizeCatalogOperator(operator, index) {
+  const actividades = Array.isArray(operator.actividades)
+    ? operator.actividades
+    : Array.isArray(operator.activities)
+      ? operator.activities
+      : [];
+
+  return {
+    id: operator.id || generateId('CAT-OP'),
+    nombre: operator.nombre ?? operator.name ?? `OP${index + 1}`,
+    subconjunto: operator.subconjunto ?? operator.subset ?? '',
+    actividades: actividades.map((activity, activityIndex) => normalizeCatalogActivity(activity, activityIndex))
+  };
+}
+
+function normalizeCatalogStation(station, index) {
+  const operadores = Array.isArray(station.operadores)
+    ? station.operadores
+    : Array.isArray(station.operators)
+      ? station.operators
+      : [];
+
+  return {
+    id: station.id || generateId('CAT-ST'),
+    nombre: station.nombre ?? station.name ?? `Estación ${index + 1}`,
+    operadores: operadores.map((operator, operatorIndex) => normalizeCatalogOperator(operator, operatorIndex))
+  };
+}
+
+function normalizeCatalogForLine(catalog, area, line) {
+  const base = catalog && typeof catalog === 'object' ? catalog : {};
+  const estaciones = Array.isArray(base.estaciones)
+    ? base.estaciones
+    : createEmptyCatalog(area, line).estaciones;
+
+  return {
+    planta: base.planta || CATALOG_PLANT_NAME,
+    area: base.area || area,
+    linea: base.linea || base.line || line,
+    estaciones: estaciones.map((station, index) => normalizeCatalogStation(station, index))
+  };
+}
+
+function ensureCatalogForSelectedLine() {
+  const { area, linea } = getCatalogDashboardContext();
+  const key = catalogLineKey(area, linea);
+  const store = readCatalogStore();
+  const created = !store[key];
+
+  if (created) {
+    store[key] = createEmptyCatalog(area, linea);
+    writeCatalogStore(store);
+  }
+
+  return {
+    catalog: normalizeCatalogForLine(store[key], area, linea),
+    created,
+    key
+  };
+}
+
+function getCatalogForSelectedLine() {
+  return ensureCatalogForSelectedLine().catalog;
+}
+
+function readChangeDatabaseLog() {
+  try {
+    const raw = localStorage.getItem(CHANGE_DATABASE_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeChangeDatabaseLog(records) {
+  localStorage.setItem(CHANGE_DATABASE_STORAGE_KEY, JSON.stringify(Array.isArray(records) ? records : []));
+}
+
+function clearChangeDatabaseLog() {
+  localStorage.removeItem(CHANGE_DATABASE_STORAGE_KEY);
+}
+
+function formatLocalDateTime(date = new Date()) {
+  const pad = value => String(value).padStart(2, '0');
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate())
+  ].join('-') + ' ' + [
+    pad(date.getHours()),
+    pad(date.getMinutes())
+  ].join(':');
+}
+
+function createCatalogChangeRecord(user, catalog) {
+  return {
+    fechaHora: formatLocalDateTime(),
+    usuario: user.displayName,
+    area: catalog.area,
+    linea: catalog.linea,
+    estacion: 'Varias estaciones',
+    cambio: 'Se actualizaron estaciones, operadores y actividades del catálogo.'
+  };
+}
+
+function appendCatalogChangeRecord(user, catalog) {
+  const records = readChangeDatabaseLog();
+  records.push(createCatalogChangeRecord(user, catalog));
+  writeChangeDatabaseLog(records);
+}
+
+function getCatalogEditorState() {
+  const { area, linea } = getCatalogDashboardContext();
+  const key = catalogLineKey(area, linea);
+
+  if (_catalogDraft && _catalogDraftKey === key) {
+    return { catalog: _catalogDraft, created: _catalogCreatedInitial, key };
+  }
+
+  const { catalog, created } = ensureCatalogForSelectedLine();
+  _catalogDraft = deepClone(catalog);
+  _catalogDraftKey = key;
+  _catalogCreatedInitial = created;
+  _catalogOpenStationIds = new Set();
+  if (_catalogDraft.estaciones[0]?.id) _catalogOpenStationIds.add(_catalogDraft.estaciones[0].id);
+
+  return { catalog: _catalogDraft, created: _catalogCreatedInitial, key };
+}
+
+function resetCatalogEditorDraft() {
+  _catalogDraft = null;
+  _catalogDraftKey = null;
+  _catalogCreatedInitial = false;
+  _catalogOpenStationIds = new Set();
+}
+
+function catalogSeconds(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function calculateCatalogOperatorTotal(operator) {
+  return (operator?.actividades || []).reduce((sum, activity) => sum + catalogSeconds(activity.tiempo), 0);
+}
+
+function calculateCatalogStationTotal(station) {
+  return (station?.operadores || []).reduce((sum, operator) => sum + calculateCatalogOperatorTotal(operator), 0);
+}
+
+function calculateCatalogLineTotal(catalog) {
+  return (catalog?.estaciones || []).reduce((sum, station) => sum + calculateCatalogStationTotal(station), 0);
+}
+
+function fmtCatalogSeconds(value) {
+  return fmt(Math.round(catalogSeconds(value) * 100) / 100, 2);
+}
+
+function recalcCatalogActivityNumbers(operator) {
+  operator.actividades = (operator.actividades || []).map((activity, index) => ({
+    ...activity,
+    no: index + 1
+  }));
+}
+
+function normalizeCatalogDraftForSave(catalog) {
+  const normalized = normalizeCatalogForLine(catalog, catalog.area, catalog.linea);
+  normalized.estaciones.forEach(station => {
+    station.operadores.forEach(operator => {
+      operator.actividades = operator.actividades.map((activity, index) => ({
+        id: activity.id || generateId('CAT-ACT'),
+        no: index + 1,
+        actividad: activity.actividad || '',
+        tiempo: catalogSeconds(activity.tiempo)
+      }));
+      operator.subconjunto = operator.subconjunto || '';
+    });
+  });
+  return normalized;
+}
+
+function findCatalogStation(stationId) {
+  return _catalogDraft?.estaciones?.find(station => station.id === stationId) || null;
+}
+
+function findCatalogOperator(stationId, operatorId) {
+  const station = findCatalogStation(stationId);
+  return station?.operadores?.find(operator => operator.id === operatorId) || null;
+}
+
+function findCatalogActivity(stationId, operatorId, activityId) {
+  const operator = findCatalogOperator(stationId, operatorId);
+  return operator?.actividades?.find(activity => activity.id === activityId) || null;
+}
+
+function findCatalogOperatorsWithoutSubset(catalog) {
+  const missing = [];
+  (catalog?.estaciones || []).forEach(station => {
+    (station.operadores || []).forEach(operator => {
+      if (!String(operator.subconjunto || '').trim()) {
+        missing.push({ station, operator });
+      }
+    });
+  });
+  return missing;
+}
+
+function getNextCatalogStationName() {
+  const used = new Set((_catalogDraft?.estaciones || []).map(station => {
+    const match = String(station.nombre || '').match(/^Estación\s+(\d+)$/i);
+    return match ? Number(match[1]) : null;
+  }).filter(Boolean));
+
+  let next = 1;
+  while (used.has(next)) next++;
+  return `Estación ${next}`;
+}
+
+function getNextCatalogOperatorName(station) {
+  const used = new Set((station?.operadores || []).map(operator => {
+    const match = String(operator.nombre || '').match(/^OP(\d+)$/i);
+    return match ? Number(match[1]) : null;
+  }).filter(Boolean));
+
+  let next = 1;
+  while (used.has(next)) next++;
+  return `OP${next}`;
 }
 
 function getDefaultDashboardConfig(area = DASHBOARD_DEFAULT_AREA, line = DASHBOARD_DEFAULT_LINE) {
   return {
     area,
-    line,
-    period: 'Turno',
-    requiredPieces: 0,
-    availableSeconds: DASHBOARD_PERIOD_SECONDS.Turno
+    linea: line,
+    turno: DASHBOARD_DEFAULT_SHIFT,
+    piezasPorHora: 0,
+    eficienciaPorcentaje: DASHBOARD_DEFAULT_EFFICIENCY,
+    graficoPor: DASHBOARD_DEFAULT_GRAPH_BY
   };
+}
+
+function normalizeDashboardConfig(config, area = DASHBOARD_DEFAULT_AREA, line = DASHBOARD_DEFAULT_LINE) {
+  const turno = DASHBOARD_SHIFT_CONFIG[config?.turno] ? config.turno : DASHBOARD_DEFAULT_SHIFT;
+  const piezasPorHora = Math.max(0, Number(
+    config?.piezasPorHora ??
+    config?.piecesPerHour ??
+    config?.piezasRequeridas ??
+    config?.requiredPieces ??
+    0
+  ) || 0);
+  const eficienciaPorcentaje = Math.max(0, Number(
+    config?.eficienciaPorcentaje ??
+    config?.efficiencyPercent ??
+    DASHBOARD_DEFAULT_EFFICIENCY
+  ) || 0);
+  const graficoPor = ['station', 'operator', 'subconjunto'].includes(config?.graficoPor || config?.graphBy)
+    ? (config?.graficoPor || config?.graphBy)
+    : DASHBOARD_DEFAULT_GRAPH_BY;
+
+  return {
+    area,
+    linea: line,
+    turno,
+    piezasPorHora,
+    eficienciaPorcentaje,
+    graficoPor
+  };
+}
+
+function readDashboardConfigStore() {
+  try {
+    const raw = localStorage.getItem(DASHBOARD_CONFIG_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeDashboardConfigStore(store) {
+  localStorage.setItem(DASHBOARD_CONFIG_STORAGE_KEY, JSON.stringify(store));
 }
 
 function ensureDashboardState() {
@@ -224,115 +692,127 @@ function ensureDashboardState() {
   if (!lines.includes(state.dashboardSelection.line)) {
     state.dashboardSelection.line = lines[0];
   }
-  state.dashboardLineConfigs = state.dashboardLineConfigs || {};
+  const existingStore = readDashboardConfigStore();
+  if (Object.keys(existingStore).length === 0 && state.dashboardLineConfigs) {
+    const migratedStore = {};
+    Object.values(state.dashboardLineConfigs).forEach(config => {
+      const line = config.linea || config.line;
+      if (!config.area || !line) return;
+      const normalized = normalizeDashboardConfig(config, config.area, line);
+      migratedStore[dashboardLineKey(normalized.area, normalized.linea)] = {
+        area: normalized.area,
+        linea: normalized.linea,
+        turno: normalized.turno,
+        piezasPorHora: normalized.piezasPorHora,
+        eficienciaPorcentaje: normalized.eficienciaPorcentaje,
+        graficoPor: normalized.graficoPor
+      };
+    });
+    if (Object.keys(migratedStore).length > 0) writeDashboardConfigStore(migratedStore);
+  }
 }
 
 function getDashboardLineConfig(area, line) {
   ensureDashboardState();
-  const saved = state.dashboardLineConfigs[dashboardLineKey(area, line)];
-  return saved ? { ...getDefaultDashboardConfig(area, line), ...saved, area, line } : getDefaultDashboardConfig(area, line);
+  const store = readDashboardConfigStore();
+  const saved = store[dashboardLineKey(area, line)];
+  return saved ? normalizeDashboardConfig(saved, area, line) : getDefaultDashboardConfig(area, line);
 }
 
 function saveDashboardLineConfig(config) {
   ensureDashboardState();
-  state.dashboardLineConfigs[dashboardLineKey(config.area, config.line)] = {
-    area: config.area,
-    line: config.line,
-    period: config.period,
-    requiredPieces: Number(config.requiredPieces) || 0,
-    availableSeconds: Number(config.availableSeconds) || 0
+  const line = config.linea || config.line;
+  const normalized = normalizeDashboardConfig(config, config.area, line);
+  const store = readDashboardConfigStore();
+  store[dashboardLineKey(normalized.area, normalized.linea)] = {
+    area: normalized.area,
+    linea: normalized.linea,
+    turno: normalized.turno,
+    piezasPorHora: normalized.piezasPorHora,
+    eficienciaPorcentaje: normalized.eficienciaPorcentaje,
+    graficoPor: normalized.graficoPor
   };
+  writeDashboardConfigStore(store);
 }
 
-function findDashboardStoredBalance(area, line) {
-  const key = dashboardLineKey(area, line);
-  const stores = [
-    state.dashboardLineBalances,
-    state.savedLineBalances,
-    state.lineBalances,
-    state.balanceosGuardados
-  ].filter(Boolean);
-
-  for (const store of stores) {
-    if (Array.isArray(store)) {
-      const match = store.find(item =>
-        item &&
-        (item.area === area || item.areaName === area) &&
-        (item.line === line || item.lineName === line)
-      );
-      if (match) return match;
-    } else if (store[key]) {
-      return store[key];
-    }
-  }
-
-  if (area === DASHBOARD_DEFAULT_AREA && line === DASHBOARD_DEFAULT_LINE && state.stationAssignments?.length) {
-    return { assignments: state.stationAssignments };
-  }
-
-  return null;
+function getDashboardCatalog(area, line) {
+  const store = readCatalogStore();
+  const saved = store[catalogLineKey(area, line)];
+  return saved ? normalizeCatalogForLine(saved, area, line) : null;
 }
 
-function getDashboardOperatorLoads(area, line) {
-  const balance = findDashboardStoredBalance(area, line);
-  if (!balance) return [];
-
-  if (Array.isArray(balance)) {
-    const loads = calculateStationLoads(balance);
-    return Object.keys(loads).map(Number).sort((a, b) => a - b).map((station, index) => ({
-      label: `OP${index + 1}`,
-      time: loads[station] || 0
-    }));
-  }
-
-  const assignments = balance.assignments || balance.stationAssignments || balance.asignaciones;
-  if (Array.isArray(assignments) && assignments.length) {
-    const loads = calculateStationLoads(assignments);
-    return Object.keys(loads).map(Number).sort((a, b) => a - b).map((station, index) => ({
-      label: `OP${index + 1}`,
-      time: loads[station] || 0
-    }));
-  }
-
-  const operatorRows = balance.operatorLoads || balance.operators || balance.operadores;
-  if (Array.isArray(operatorRows) && operatorRows.length) {
-    return operatorRows.map((op, index) => ({
-      label: `OP${index + 1}`,
-      time: Number(op.time ?? op.load ?? op.totalTime ?? op.standardTime ?? op.seconds ?? 0)
-    })).filter(op => op.time > 0);
-  }
-
-  const stationLoads = balance.stationLoads || balance.loads;
-  if (stationLoads && typeof stationLoads === 'object') {
-    return Object.keys(stationLoads).map(Number).sort((a, b) => a - b).map((station, index) => ({
-      label: `OP${index + 1}`,
-      time: Number(stationLoads[station] || 0)
-    })).filter(op => op.time > 0);
-  }
-
-  return [];
+function getDashboardStationRows(catalog) {
+  return (catalog?.estaciones || []).map((station, index) => ({
+    id: station.id || `station-${index + 1}`,
+    label: station.nombre || `Estación ${index + 1}`,
+    time: calculateCatalogStationTotal(station)
+  }));
 }
 
-function computeDashboardMetrics(config, operatorLoads) {
-  const requiredPieces = Math.max(0, Number(config.requiredPieces) || 0);
-  const availableSeconds = Math.max(0, Number(config.availableSeconds) || 0);
-  const takt = requiredPieces > 0 ? availableSeconds / requiredPieces : 0;
-  const totalWorkContent = operatorLoads.reduce((sum, op) => sum + op.time, 0);
-  const operatorCount = operatorLoads.length;
-  const bottleneck = operatorLoads.reduce((max, op) => op.time > max.time ? op : max, { label: 'N/A', time: 0 });
-  const efficiency = operatorCount > 0 && takt > 0 ? (totalWorkContent / (operatorCount * takt)) * 100 : 0;
+function getDashboardOperatorRows(catalog) {
+  const operatorTotals = {};
+  (catalog?.estaciones || []).forEach(station => {
+    (station.operadores || []).forEach(operator => {
+      const label = String(operator.nombre || '').trim() || 'Sin nombre';
+      operatorTotals[label] = (operatorTotals[label] || 0) + calculateCatalogOperatorTotal(operator);
+    });
+  });
+
+  return Object.keys(operatorTotals)
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map(label => ({ label, time: operatorTotals[label] }));
+}
+
+function getDashboardSubsetRows(catalog) {
+  const subsetTotals = {};
+  (catalog?.estaciones || []).forEach(station => {
+    (station.operadores || []).forEach(operator => {
+      const label = String(operator.subconjunto || '').trim() || 'Sin subconjunto';
+      subsetTotals[label] = (subsetTotals[label] || 0) + calculateCatalogOperatorTotal(operator);
+    });
+  });
+
+  return Object.keys(subsetTotals)
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map(label => ({ label, time: subsetTotals[label] }));
+}
+
+function computeDashboardMetrics(config, catalog) {
+  const shift = DASHBOARD_SHIFT_CONFIG[config.turno] || DASHBOARD_SHIFT_CONFIG[DASHBOARD_DEFAULT_SHIFT];
+  const piezasPorHora = Math.max(0, Number(config.piezasPorHora) || 0);
+  const eficienciaPorcentaje = Math.max(0, Number(config.eficienciaPorcentaje) || 0);
+  const eficienciaDecimal = eficienciaPorcentaje / 100;
+  const availableSeconds = shift.seconds;
+  const tiempoCicloTotal = calculateCatalogLineTotal(catalog);
+  const stationRows = getDashboardStationRows(catalog);
+  const operatorRows = getDashboardOperatorRows(catalog);
+  const subsetRows = getDashboardSubsetRows(catalog);
+  const bottleneck = stationRows.reduce(
+    (max, station) => station.time > max.time ? station : max,
+    { label: 'N/A', time: 0 }
+  );
+  const takt = piezasPorHora > 0 ? 3600 / piezasPorHora : 0;
+  const operatorCount = piezasPorHora > 0 && tiempoCicloTotal > 0 && eficienciaDecimal > 0
+    ? Math.ceil((piezasPorHora * (tiempoCicloTotal / 3600)) / (shift.hours * eficienciaDecimal))
+    : 0;
   const capacity = bottleneck.time > 0 ? Math.floor(availableSeconds / bottleneck.time) : 0;
 
   return {
-    requiredPieces,
+    turno: config.turno,
+    shiftHours: shift.hours,
+    piezasPorHora,
+    eficienciaPorcentaje,
     availableSeconds,
     takt,
-    totalWorkContent,
+    tiempoCicloTotal,
     operatorCount,
     bottleneck,
-    efficiency,
     capacity,
-    hasBalance: operatorCount > 0
+    stationRows,
+    operatorRows,
+    subsetRows,
+    hasCatalog: !!catalog,
+    hasTimes: tiempoCicloTotal > 0
   };
 }
 
@@ -442,6 +922,7 @@ function computeSummary(s) {
 const PAGE_LABELS = {
   dashboard:     'Dashboard',
   catalogs:      'Catálogos',
+  changeDatabase:'Base de Datos de Cambios',
   standardTimes: 'Tiempos Estándar',
   timeStudy:     'Estudios de Tiempo',
   balance:       'Balanceo',
@@ -457,6 +938,7 @@ function navigate(page) {
     _redistribActive = false;
     _redistribAssignments = null;
   }
+  if (page !== 'catalogs') resetCatalogEditorDraft();
   state.currentPage = page;
   // Update nav active state
   document.querySelectorAll('.nav-item[data-page]').forEach(el => {
@@ -477,6 +959,7 @@ function renderPage(page) {
   const renderers = {
     dashboard:     renderDashboard,
     catalogs:      renderCatalogs,
+    changeDatabase: renderChangeDatabase,
     standardTimes: renderStandardTimes,
     timeStudy:     renderTimeStudy,
     balance:       renderBalance,
@@ -515,42 +998,31 @@ function renderPlaceholder(title, sub) {
 }
 
 // ── Dashboard ─────────────────────────────────
-function renderDashboardMetricCards(metrics, period) {
-  if (!metrics.hasBalance) {
-    return `
-      <div class="dashboard-empty-state">
-        <strong>No hay balanceo guardado para esta línea. Crea o asigna un balanceo primero.</strong>
-        <span>Los cálculos se mostrarán cuando exista una carga por operador para la línea seleccionada.</span>
-      </div>`;
-  }
-
-  const piecesLabel = period === 'Hora' ? 'Piezas requeridas por hora' : 'Piezas requeridas por turno';
+function renderDashboardMetricCards(metrics) {
   const taktValue = metrics.takt > 0 ? fmt(metrics.takt, 2) : 'N/A';
+  const cycleValue = metrics.tiempoCicloTotal > 0 ? fmt(metrics.tiempoCicloTotal, 2) : '0.00';
   const bottleneckLabel = metrics.bottleneck.time > 0
-    ? `${metrics.bottleneck.label} · ${fmt(metrics.bottleneck.time, 2)}s`
+    ? `${metrics.bottleneck.label} — ${fmt(metrics.bottleneck.time, 2)}s`
     : 'N/A';
 
   return `
     <div class="kpi-grid dashboard-kpi-grid">
       <div class="kpi-card">
-        <div class="kpi-label">${piecesLabel}</div>
-        <div class="kpi-value">${metrics.requiredPieces.toLocaleString('es-MX')}</div>
-      </div>
-      <div class="kpi-card">
         <div class="kpi-label">Tiempo disponible</div>
         <div class="kpi-value">${metrics.availableSeconds.toLocaleString('es-MX')}<span class="kpi-unit">seg</span></div>
+        <div class="kpi-meta">${esc(metrics.turno)} · ${metrics.shiftHours} h</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Takt Time</div>
         <div class="kpi-value">${taktValue}<span class="kpi-unit">${metrics.takt > 0 ? 'seg' : ''}</span></div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Número de operadores</div>
-        <div class="kpi-value">${metrics.operatorCount}</div>
+        <div class="kpi-label">Tiempo ciclo total</div>
+        <div class="kpi-value">${cycleValue}<span class="kpi-unit">seg</span></div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">Eficiencia</div>
-        <div class="kpi-value ${metrics.efficiency >= 80 ? 'kpi-value--green' : metrics.efficiency >= 65 ? 'kpi-value--warning' : 'kpi-value--danger'}">${fmtPct(metrics.efficiency)}</div>
+        <div class="kpi-label">Número de operadores</div>
+        <div class="kpi-value">${metrics.operatorCount}</div>
       </div>
       <div class="kpi-card ${metrics.bottleneck.time > metrics.takt && metrics.takt > 0 ? 'kpi-card--danger' : ''}">
         <div class="kpi-label">Cuello de botella</div>
@@ -558,24 +1030,26 @@ function renderDashboardMetricCards(metrics, period) {
       </div>
       <div class="kpi-card">
         <div class="kpi-label">Capacidad máxima</div>
-        <div class="kpi-value">${metrics.capacity}</div>
+        <div class="kpi-value">${metrics.capacity}<span class="kpi-unit">${metrics.capacity > 0 ? 'pzs' : ''}</span></div>
       </div>
     </div>`;
 }
 
-function renderDashboardOperatorChart(metrics, operatorLoads) {
-  if (!metrics.hasBalance) {
+function renderDashboardChart(metrics, rows, graphBy) {
+  if (!metrics.hasCatalog || !metrics.hasTimes || rows.length === 0) {
     return `
       <div class="dashboard-chart-empty">
-        <span>Sin datos de operadores para graficar</span>
+        <strong>No hay tiempos guardados en Catálogo para esta línea.</strong>
+        <span>Guarda estaciones, operadores y actividades en Catálogo para alimentar el Dashboard.</span>
       </div>`;
   }
 
   const chartHeight = 260;
-  const maxLoad = Math.max(...operatorLoads.map(op => op.time), metrics.takt || 0, 1);
+  const maxLoad = Math.max(...rows.map(row => row.time), metrics.takt || 0, 1);
   const maxVal = Math.ceil((maxLoad * 1.2) / 10) * 10 || 10;
   const scale = chartHeight / maxVal;
   const taktBottom = metrics.takt > 0 ? Math.round(metrics.takt * scale) : 0;
+  const bottleneckLabel = graphBy === 'station' ? metrics.bottleneck.label : '';
 
   return `
     <div class="dashboard-chart">
@@ -584,19 +1058,19 @@ function renderDashboardOperatorChart(metrics, operatorLoads) {
           <span>Takt ${fmt(metrics.takt, 2)}s</span>
         </div>` : ''}
       <div class="dashboard-chart-bars">
-        ${operatorLoads.map(op => {
-          const height = Math.max(Math.round(op.time * scale), 2);
-          const status = metrics.takt > 0 && op.time > metrics.takt
+        ${rows.map(row => {
+          const height = Math.max(Math.round(row.time * scale), 2);
+          const status = metrics.takt > 0 && row.time > metrics.takt
             ? 'over'
-            : metrics.takt > 0 && op.time >= metrics.takt * 0.9
+            : metrics.takt > 0 && row.time >= metrics.takt * 0.9
               ? 'near'
               : 'ok';
-          const isBottleneck = op.label === metrics.bottleneck.label;
+          const isBottleneck = graphBy === 'station' && row.label === bottleneckLabel;
           return `
             <div class="dashboard-chart-bar-col">
-              <div class="dashboard-chart-value">${fmt(op.time, 1)}s</div>
+              <div class="dashboard-chart-value">${fmt(row.time, 1)}s</div>
               <div class="dashboard-chart-bar dashboard-chart-bar--${status}${isBottleneck ? ' bottleneck' : ''}" style="height:${height}px"></div>
-              <div class="dashboard-chart-label">${op.label}</div>
+              <div class="dashboard-chart-label" title="${esc(row.label)}">${esc(row.label)}</div>
             </div>`;
         }).join('')}
       </div>
@@ -613,20 +1087,25 @@ function renderDashboard(container) {
   const lineOptions = DASHBOARD_LINES_BY_AREA[area].map(name =>
     `<option value="${esc(name)}"${name === line ? ' selected' : ''}>${esc(name)}</option>`
   ).join('');
+  const shiftOptions = Object.keys(DASHBOARD_SHIFT_CONFIG).map(name =>
+    `<option value="${esc(name)}"${name === config.turno ? ' selected' : ''}>${esc(name)}</option>`
+  ).join('');
 
   container.innerHTML = `
     <div class="page-header">
       <h1 class="page-title">Dashboard</h1>
-      <p class="page-subtitle">Indicadores de balanceo por área y línea</p>
+      <p class="page-subtitle">Indicadores calculados desde el Catálogo guardado por línea</p>
     </div>
 
     <div class="card mb-6">
       <div class="card-header">
         <div>
-          <div class="card-title">Filtros y periodo</div>
-          <div class="card-subtitle">La configuración se guarda de forma independiente por línea</div>
+          <div class="card-title">Filtros de producción</div>
+          <div class="card-subtitle">La configuración se guarda de forma independiente por área y línea</div>
         </div>
-        <button class="btn btn--primary" id="dashboard-save">Actualizar Dashboard</button>
+        <div class="btn-group">
+          <button class="btn btn--primary" id="dashboard-save">Actualizar Dashboard</button>
+        </div>
       </div>
       <div class="card-body">
         <div class="dashboard-controls">
@@ -639,19 +1118,24 @@ function renderDashboard(container) {
             <select class="form-select" id="dashboard-line">${lineOptions}</select>
           </div>
           <div class="form-group">
-            <label class="form-label" for="dashboard-period">Periodo</label>
-            <select class="form-select" id="dashboard-period">
-              <option value="Hora"${config.period === 'Hora' ? ' selected' : ''}>Hora</option>
-              <option value="Turno"${config.period === 'Turno' ? ' selected' : ''}>Turno</option>
+            <label class="form-label" for="dashboard-shift">Turno</label>
+            <select class="form-select" id="dashboard-shift">${shiftOptions}</select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="dashboard-pieces-hour">Piezas por hora</label>
+            <input class="form-input" id="dashboard-pieces-hour" type="number" min="0" step="0.01" value="${config.piezasPorHora}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="dashboard-efficiency">% eficiencia</label>
+            <input class="form-input" id="dashboard-efficiency" type="number" min="0" max="100" step="0.01" value="${config.eficienciaPorcentaje}" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="dashboard-graph-by">Ver gráfico por</label>
+            <select class="form-select" id="dashboard-graph-by">
+              <option value="station"${config.graficoPor === 'station' ? ' selected' : ''}>Estación</option>
+              <option value="operator"${config.graficoPor === 'operator' ? ' selected' : ''}>Operador</option>
+              <option value="subconjunto"${config.graficoPor === 'subconjunto' ? ' selected' : ''}>Subconjunto</option>
             </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label" id="dashboard-pieces-label" for="dashboard-pieces">${config.period === 'Hora' ? 'Piezas requeridas por hora' : 'Piezas requeridas por turno'}</label>
-            <input class="form-input" id="dashboard-pieces" type="number" min="0" step="1" value="${config.requiredPieces}" />
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="dashboard-available">Tiempo disponible en segundos</label>
-            <input class="form-input" id="dashboard-available" type="number" min="0" step="1" value="${config.availableSeconds}" />
           </div>
         </div>
       </div>
@@ -662,8 +1146,8 @@ function renderDashboard(container) {
     <div class="card dashboard-chart-card">
       <div class="card-header">
         <div>
-          <div class="card-title">Gráfico de tiempos por operador</div>
-          <div class="card-subtitle">Comparación de OP1, OP2, OP3 contra Takt Time</div>
+          <div class="card-title" id="dashboard-chart-title">Gráfico de tiempos</div>
+          <div class="card-subtitle" id="dashboard-chart-subtitle">Referencia visual contra Takt Time</div>
         </div>
       </div>
       <div class="card-body" id="dashboard-chart-wrap"></div>
@@ -672,28 +1156,47 @@ function renderDashboard(container) {
 
   const areaEl = container.querySelector('#dashboard-area');
   const lineEl = container.querySelector('#dashboard-line');
-  const periodEl = container.querySelector('#dashboard-period');
-  const piecesEl = container.querySelector('#dashboard-pieces');
-  const availableEl = container.querySelector('#dashboard-available');
-  const piecesLabel = container.querySelector('#dashboard-pieces-label');
+  const shiftEl = container.querySelector('#dashboard-shift');
+  const piecesEl = container.querySelector('#dashboard-pieces-hour');
+  const efficiencyEl = container.querySelector('#dashboard-efficiency');
+  const graphByEl = container.querySelector('#dashboard-graph-by');
   const metricsEl = container.querySelector('#dashboard-metrics');
   const chartEl = container.querySelector('#dashboard-chart-wrap');
+  const chartTitleEl = container.querySelector('#dashboard-chart-title');
+  const chartSubtitleEl = container.querySelector('#dashboard-chart-subtitle');
 
   const readDraft = () => ({
     area: areaEl.value,
     line: lineEl.value,
-    period: periodEl.value,
-    requiredPieces: Math.max(0, parseInt(piecesEl.value) || 0),
-    availableSeconds: Math.max(0, parseInt(availableEl.value) || 0)
+    linea: lineEl.value,
+    turno: shiftEl.value,
+    piezasPorHora: Math.max(0, parseFloat(piecesEl.value) || 0),
+    eficienciaPorcentaje: Math.max(0, parseFloat(efficiencyEl.value) || 0),
+    graficoPor: graphByEl.value
   });
 
   const refreshDashboard = () => {
     const draft = readDraft();
-    piecesLabel.textContent = draft.period === 'Hora' ? 'Piezas requeridas por hora' : 'Piezas requeridas por turno';
-    const operatorLoads = getDashboardOperatorLoads(draft.area, draft.line);
-    const metrics = computeDashboardMetrics(draft, operatorLoads);
-    metricsEl.innerHTML = renderDashboardMetricCards(metrics, draft.period);
-    chartEl.innerHTML = renderDashboardOperatorChart(metrics, operatorLoads);
+    const catalog = getDashboardCatalog(draft.area, draft.line);
+    const metrics = computeDashboardMetrics(draft, catalog);
+    const chartRows = draft.graficoPor === 'operator'
+      ? metrics.operatorRows
+      : draft.graficoPor === 'subconjunto'
+        ? metrics.subsetRows
+        : metrics.stationRows;
+
+    metricsEl.innerHTML = renderDashboardMetricCards(metrics);
+    chartTitleEl.textContent = draft.graficoPor === 'operator'
+      ? 'Gráfico de tiempos por operador'
+      : draft.graficoPor === 'subconjunto'
+        ? 'Gráfico de tiempos por subconjunto'
+        : 'Gráfico de tiempos por estación';
+    chartSubtitleEl.textContent = draft.graficoPor === 'operator'
+      ? 'Suma de tiempos del mismo operador en todas las estaciones'
+      : draft.graficoPor === 'subconjunto'
+        ? 'Suma de tiempos por producto armado'
+        : 'Tiempo total de cada estación del Catálogo';
+    chartEl.innerHTML = renderDashboardChart(metrics, chartRows, draft.graficoPor);
   };
 
   areaEl.addEventListener('change', () => {
@@ -709,14 +1212,8 @@ function renderDashboard(container) {
     renderDashboard(container);
   });
 
-  periodEl.addEventListener('change', () => {
-    availableEl.value = DASHBOARD_PERIOD_SECONDS[periodEl.value];
-    refreshDashboard();
-  });
-
-  [piecesEl, availableEl].forEach(input => {
-    input.addEventListener('input', refreshDashboard);
-  });
+  [shiftEl, graphByEl].forEach(input => input.addEventListener('change', refreshDashboard));
+  [piecesEl, efficiencyEl].forEach(input => input.addEventListener('input', refreshDashboard));
 
   container.querySelector('#dashboard-save').addEventListener('click', () => {
     const draft = readDraft();
@@ -731,107 +1228,581 @@ function renderDashboard(container) {
   refreshDashboard();
 }
 
+function getCatalogStationOperatorLabel(station) {
+  const operadores = Array.isArray(station.operadores) ? station.operadores : [];
+  const operatorNames = operadores
+    .map(op => op.nombre || op.name)
+    .filter(Boolean);
+  return operatorNames.length ? operatorNames.join(', ') : 'Sin operadores';
+}
+
+function renderCatalogActivityRow(station, operator, activity, index) {
+  return `
+    <tr>
+      <td class="font-mono catalog-activity-number">${index + 1}</td>
+      <td>
+        <input
+          class="form-input w-full"
+          data-catalog-action="activity-name"
+          data-station-id="${esc(station.id)}"
+          data-operator-id="${esc(operator.id)}"
+          data-activity-id="${esc(activity.id)}"
+          type="text"
+          value="${esc(activity.actividad || '')}"
+          placeholder="Actividad"
+        />
+      </td>
+      <td>
+        <input
+          class="form-input catalog-time-input"
+          data-catalog-action="activity-time"
+          data-station-id="${esc(station.id)}"
+          data-operator-id="${esc(operator.id)}"
+          data-activity-id="${esc(activity.id)}"
+          type="number"
+          min="0"
+          step="0.01"
+          value="${esc(activity.tiempo ?? '')}"
+          placeholder="0"
+        />
+      </td>
+      <td class="td-actions">
+        <button
+          class="btn btn--ghost btn--sm"
+          style="color:var(--danger)"
+          type="button"
+          data-catalog-action="delete-activity"
+          data-station-id="${esc(station.id)}"
+          data-operator-id="${esc(operator.id)}"
+          data-activity-id="${esc(activity.id)}"
+        >Eliminar</button>
+      </td>
+    </tr>
+  `;
+}
+
+function renderCatalogOperator(station, operator, index) {
+  const actividades = Array.isArray(operator.actividades) ? operator.actividades : [];
+  const rows = actividades.length
+    ? actividades.map((activity, activityIndex) => renderCatalogActivityRow(station, operator, activity, activityIndex)).join('')
+    : `<tr><td colspan="4" class="catalog-empty-table-cell">Sin actividades.</td></tr>`;
+
+  return `
+    <div class="catalog-operator" data-operator-id="${esc(operator.id)}">
+      <div class="catalog-operator-header">
+        <div class="catalog-operator-fields">
+          <div class="catalog-operator-title">
+            <label class="form-label" for="catalog-op-${esc(operator.id)}">Operador</label>
+            <input
+              class="form-input catalog-operator-name"
+              id="catalog-op-${esc(operator.id)}"
+              data-catalog-action="operator-name"
+              data-station-id="${esc(station.id)}"
+              data-operator-id="${esc(operator.id)}"
+              type="text"
+              value="${esc(operator.nombre ?? `OP${index + 1}`)}"
+            />
+          </div>
+          <div class="catalog-operator-subset">
+            <label class="form-label" for="catalog-subset-${esc(operator.id)}">Subconjunto</label>
+            <input
+              class="form-input catalog-subset-input"
+              id="catalog-subset-${esc(operator.id)}"
+              data-catalog-action="operator-subset"
+              data-station-id="${esc(station.id)}"
+              data-operator-id="${esc(operator.id)}"
+              type="text"
+              value="${esc(operator.subconjunto || '')}"
+              placeholder="Ej. SGD_Q500"
+            />
+          </div>
+        </div>
+        <div class="catalog-operator-actions">
+          <div class="catalog-total-pill">
+            Total operador:
+            <strong data-catalog-operator-total="${esc(operator.id)}">${fmtCatalogSeconds(calculateCatalogOperatorTotal(operator))} s</strong>
+          </div>
+          <button
+            class="btn btn--ghost btn--sm"
+            style="color:var(--danger)"
+            type="button"
+            data-catalog-action="delete-operator"
+            data-station-id="${esc(station.id)}"
+            data-operator-id="${esc(operator.id)}"
+          >Eliminar operador</button>
+        </div>
+      </div>
+
+      <div class="table-wrapper catalog-activity-table">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:64px">No.</th>
+              <th>Actividad</th>
+              <th style="width:150px">Tiempo</th>
+              <th class="td-actions">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+
+      <div class="catalog-operator-footer">
+        <button
+          class="btn btn--secondary btn--sm"
+          type="button"
+          data-catalog-action="add-activity"
+          data-station-id="${esc(station.id)}"
+          data-operator-id="${esc(operator.id)}"
+        >Agregar actividad</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderCatalogStation(station, index) {
+  const operadores = Array.isArray(station.operadores) ? station.operadores : [];
+  const operatorLabel = getCatalogStationOperatorLabel(station);
+  const isOpen = _catalogOpenStationIds.has(station.id) || (_catalogOpenStationIds.size === 0 && index === 0);
+
+  return `
+    <details class="catalog-station" data-station-id="${esc(station.id)}" ${isOpen ? 'open' : ''}>
+      <summary class="catalog-station-summary">
+        <div class="catalog-station-title">
+          <label class="form-label" for="catalog-st-${esc(station.id)}">Estación</label>
+          <input
+            class="form-input catalog-station-name"
+            id="catalog-st-${esc(station.id)}"
+            data-catalog-action="station-name"
+            data-station-id="${esc(station.id)}"
+            type="text"
+            value="${esc(station.nombre ?? `Estación ${index + 1}`)}"
+          />
+        </div>
+        <span class="catalog-station-meta" data-catalog-station-operators="${esc(station.id)}">${esc(operatorLabel)}</span>
+        <span class="catalog-total-pill">
+          Total estación:
+          <strong data-catalog-station-total="${esc(station.id)}">${fmtCatalogSeconds(calculateCatalogStationTotal(station))} s</strong>
+        </span>
+        <button
+          class="btn btn--ghost btn--sm"
+          style="color:var(--danger)"
+          type="button"
+          data-catalog-action="delete-station"
+          data-station-id="${esc(station.id)}"
+        >Eliminar estación</button>
+      </summary>
+      <div class="catalog-station-body">
+        ${operadores.length === 0 ? `
+          <div class="catalog-empty-operators">
+            <p>No hay operadores asignados.</p>
+            <button
+              class="btn btn--secondary btn--sm"
+              type="button"
+              data-catalog-action="add-operator"
+              data-station-id="${esc(station.id)}"
+            >Agregar operador</button>
+          </div>
+        ` : `
+          <div class="catalog-operator-list">
+            ${operadores.map((operator, operatorIndex) => renderCatalogOperator(station, operator, operatorIndex)).join('')}
+          </div>
+          <button
+            class="btn btn--secondary btn--sm"
+            type="button"
+            data-catalog-action="add-operator"
+            data-station-id="${esc(station.id)}"
+          >Agregar operador</button>
+        `}
+      </div>
+    </details>
+  `;
+}
+
 // ── Stubs para fases futuras ──────────────────
 function renderCatalogs(container) {
-  const ops    = state.operations;
-  const active = ops.filter(o => o.active).length;
-  const takt   = calculateTaktTime(state.balanceSettings);
-  const twc    = calculateTotalWorkContent(getActiveOperations());
+  const { catalog, created } = getCatalogEditorState();
+  const lineTotal = calculateCatalogLineTotal(catalog);
 
   container.innerHTML = `
-    <div class="page-header">
-      <h1 class="page-title">Catálogos</h1>
-      <p class="page-subtitle">Estructura jerárquica y operaciones de la línea de producción</p>
+    <div class="page-header catalog-page-header">
+      <div>
+        <h1 class="page-title">Catálogo</h1>
+        <p class="page-subtitle">Estructura de estaciones, operadores y actividades por línea</p>
+      </div>
+      <button class="btn btn--primary" type="button" data-catalog-action="save-catalog">Guardar cambios</button>
     </div>
 
     <div class="entity-grid mb-6">
       <div class="entity-card">
         <div class="entity-card-label">Planta</div>
-        <div class="entity-card-name">${esc(state.plant.name)}</div>
-        <div class="entity-card-meta">${esc(state.plant.location)}</div>
+        <div class="entity-card-name">${esc(catalog.planta)}</div>
+        <div class="entity-card-meta">Contexto fijo del catálogo</div>
       </div>
       <div class="entity-card">
         <div class="entity-card-label">Área</div>
-        <div class="entity-card-name">${esc(state.area.name)}</div>
-        <div class="entity-card-meta">${esc(state.process.name)}</div>
+        <div class="entity-card-name">${esc(catalog.area)}</div>
+        <div class="entity-card-meta">Última selección del Dashboard</div>
       </div>
       <div class="entity-card">
-        <div class="entity-card-label">Línea de Producción</div>
-        <div class="entity-card-name">${esc(state.line.name)}</div>
-        <div class="entity-card-meta">${esc(state.line.type)}</div>
+        <div class="entity-card-label">Línea</div>
+        <div class="entity-card-name">${esc(catalog.linea)}</div>
+        <div class="entity-card-meta">Última selección del Dashboard</div>
       </div>
       <div class="entity-card">
-        <div class="entity-card-label">Proceso</div>
-        <div class="entity-card-name">${esc(state.process.name)}</div>
-        <div class="entity-card-meta">${active} actividades activas</div>
+        <div class="entity-card-label">Total línea</div>
+        <div class="entity-card-name"><span data-catalog-line-total>${fmtCatalogSeconds(lineTotal)}</span><span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> s</span></div>
+        <div class="entity-card-meta">Suma de estaciones</div>
       </div>
+    </div>
+
+    ${created ? `
+      <div class="catalog-initial-message mb-6">
+        No hay información guardada para esta línea. Se creó una estructura inicial vacía para comenzar a capturar.
+      </div>
+    ` : ''}
+
+    <div class="card catalog-structure-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Estructura del Catálogo</div>
+          <div class="card-subtitle">Los cambios se mantienen como borrador hasta presionar Guardar cambios</div>
+        </div>
+        <button class="btn btn--secondary btn--sm" type="button" data-catalog-action="add-station">Agregar estación</button>
+      </div>
+      <div class="card-body">
+        ${catalog.estaciones.length ? `
+          <div class="catalog-station-list">
+            ${catalog.estaciones.map((station, index) => renderCatalogStation(station, index)).join('')}
+          </div>
+        ` : `
+          <div class="catalog-empty-line">
+            <p>No hay estaciones capturadas.</p>
+            <button class="btn btn--secondary btn--sm" type="button" data-catalog-action="add-station">Agregar estación</button>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+
+  bindCatalogEditor(container);
+}
+
+function captureCatalogOpenStates(container) {
+  const openIds = new Set();
+  container.querySelectorAll('details.catalog-station').forEach(detail => {
+    if (detail.open && detail.dataset.stationId) openIds.add(detail.dataset.stationId);
+  });
+  _catalogOpenStationIds = openIds;
+}
+
+function setCatalogDataText(container, attrName, id, value) {
+  container.querySelectorAll(`[${attrName}]`).forEach(el => {
+    if (el.getAttribute(attrName) === id) el.textContent = value;
+  });
+}
+
+function refreshCatalogEditorTotals(container) {
+  if (!_catalogDraft) return;
+
+  const lineTotalEl = container.querySelector('[data-catalog-line-total]');
+  if (lineTotalEl) lineTotalEl.textContent = fmtCatalogSeconds(calculateCatalogLineTotal(_catalogDraft));
+
+  (_catalogDraft.estaciones || []).forEach(station => {
+    setCatalogDataText(
+      container,
+      'data-catalog-station-total',
+      station.id,
+      `${fmtCatalogSeconds(calculateCatalogStationTotal(station))} s`
+    );
+    setCatalogDataText(
+      container,
+      'data-catalog-station-operators',
+      station.id,
+      getCatalogStationOperatorLabel(station)
+    );
+
+    (station.operadores || []).forEach(operator => {
+      setCatalogDataText(
+        container,
+        'data-catalog-operator-total',
+        operator.id,
+        `${fmtCatalogSeconds(calculateCatalogOperatorTotal(operator))} s`
+      );
+    });
+  });
+}
+
+function rerenderCatalogEditor(container) {
+  renderCatalogs(container || document.getElementById('main-content'));
+}
+
+function handleCatalogInput(container, input) {
+  const action = input.dataset.catalogAction;
+  const stationId = input.dataset.stationId;
+  const operatorId = input.dataset.operatorId;
+  const activityId = input.dataset.activityId;
+
+  if (action === 'station-name') {
+    const station = findCatalogStation(stationId);
+    if (station) station.nombre = input.value;
+  }
+
+  if (action === 'operator-name') {
+    const operator = findCatalogOperator(stationId, operatorId);
+    if (operator) operator.nombre = input.value;
+  }
+
+  if (action === 'operator-subset') {
+    const operator = findCatalogOperator(stationId, operatorId);
+    if (operator) operator.subconjunto = input.value;
+  }
+
+  if (action === 'activity-name') {
+    const activity = findCatalogActivity(stationId, operatorId, activityId);
+    if (activity) activity.actividad = input.value;
+  }
+
+  if (action === 'activity-time') {
+    const activity = findCatalogActivity(stationId, operatorId, activityId);
+    if (activity) activity.tiempo = input.value;
+  }
+
+  refreshCatalogEditorTotals(container);
+}
+
+function saveCatalogDraft(container) {
+  if (!_catalogDraft || !_catalogDraftKey) return;
+  const activeUser = getActiveUser();
+  if (!activeUser) {
+    showToast('Debes iniciar sesión para guardar cambios en Catálogo.', 'warning');
+    openLoginModal('Debes iniciar sesión para guardar cambios en Catálogo.');
+    return;
+  }
+  if (findCatalogOperatorsWithoutSubset(_catalogDraft).length > 0) {
+    showToast('No puedes guardar. Todos los operadores deben tener un subconjunto asignado.', 'warning');
+    return;
+  }
+  captureCatalogOpenStates(container);
+
+  const normalized = normalizeCatalogDraftForSave(_catalogDraft);
+  const store = readCatalogStore();
+  store[_catalogDraftKey] = normalized;
+  writeCatalogStore(store);
+  appendCatalogChangeRecord(activeUser, normalized);
+
+  _catalogDraft = deepClone(normalized);
+  _catalogCreatedInitial = false;
+  showToast('Cambios guardados correctamente.', 'success');
+  rerenderCatalogEditor(container);
+}
+
+function addCatalogStation(container) {
+  captureCatalogOpenStates(container);
+  const station = {
+    id: generateId('CAT-ST'),
+    nombre: getNextCatalogStationName(),
+    operadores: []
+  };
+  _catalogDraft.estaciones.push(station);
+  _catalogOpenStationIds.add(station.id);
+  rerenderCatalogEditor(container);
+}
+
+function deleteCatalogStation(container, stationId) {
+  const station = findCatalogStation(stationId);
+  if (!station) return;
+
+  showConfirm(
+    'Eliminar estación',
+    '¿Seguro que deseas eliminar esta estación? Esta acción eliminará sus operadores y actividades.',
+    () => {
+      captureCatalogOpenStates(container);
+      _catalogDraft.estaciones = _catalogDraft.estaciones.filter(item => item.id !== stationId);
+      _catalogOpenStationIds.delete(stationId);
+      rerenderCatalogEditor(container);
+    }
+  );
+}
+
+function addCatalogOperator(container, stationId) {
+  const station = findCatalogStation(stationId);
+  if (!station) return;
+
+  captureCatalogOpenStates(container);
+  const operator = {
+    id: generateId('CAT-OP'),
+    nombre: getNextCatalogOperatorName(station),
+    subconjunto: '',
+    actividades: [
+      {
+        id: generateId('CAT-ACT'),
+        no: 1,
+        actividad: '',
+        tiempo: ''
+      }
+    ]
+  };
+  station.operadores.push(operator);
+  _catalogOpenStationIds.add(stationId);
+  rerenderCatalogEditor(container);
+}
+
+function deleteCatalogOperator(container, stationId, operatorId) {
+  const station = findCatalogStation(stationId);
+  const operator = findCatalogOperator(stationId, operatorId);
+  if (!station || !operator) return;
+
+  showConfirm(
+    'Eliminar operador',
+    '¿Seguro que deseas eliminar este operador? Esta acción eliminará sus actividades.',
+    () => {
+      captureCatalogOpenStates(container);
+      station.operadores = station.operadores.filter(item => item.id !== operatorId);
+      _catalogOpenStationIds.add(stationId);
+      rerenderCatalogEditor(container);
+    }
+  );
+}
+
+function addCatalogActivity(container, stationId, operatorId) {
+  const operator = findCatalogOperator(stationId, operatorId);
+  if (!operator) return;
+
+  captureCatalogOpenStates(container);
+  operator.actividades.push({
+    id: generateId('CAT-ACT'),
+    no: operator.actividades.length + 1,
+    actividad: '',
+    tiempo: ''
+  });
+  recalcCatalogActivityNumbers(operator);
+  _catalogOpenStationIds.add(stationId);
+  rerenderCatalogEditor(container);
+}
+
+function deleteCatalogActivity(container, stationId, operatorId, activityId) {
+  const operator = findCatalogOperator(stationId, operatorId);
+  if (!operator) return;
+
+  showConfirm(
+    'Eliminar actividad',
+    '¿Seguro que deseas eliminar esta actividad?',
+    () => {
+      captureCatalogOpenStates(container);
+      operator.actividades = operator.actividades.filter(item => item.id !== activityId);
+      recalcCatalogActivityNumbers(operator);
+      _catalogOpenStationIds.add(stationId);
+      rerenderCatalogEditor(container);
+    }
+  );
+}
+
+function bindCatalogEditor(container) {
+  container.querySelectorAll('.catalog-station-summary input, .catalog-station-summary button').forEach(control => {
+    control.addEventListener('click', event => event.stopPropagation());
+  });
+
+  container.querySelectorAll('details.catalog-station').forEach(detail => {
+    detail.addEventListener('toggle', () => {
+      if (!detail.dataset.stationId) return;
+      if (detail.open) _catalogOpenStationIds.add(detail.dataset.stationId);
+      else _catalogOpenStationIds.delete(detail.dataset.stationId);
+    });
+  });
+
+  container.oninput = event => {
+    const input = event.target.closest('[data-catalog-action]');
+    if (!input || input.tagName !== 'INPUT') return;
+    handleCatalogInput(container, input);
+  };
+
+  container.onclick = event => {
+    const button = event.target.closest('button[data-catalog-action]');
+    if (!button || !container.contains(button)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    const action = button.dataset.catalogAction;
+    const stationId = button.dataset.stationId;
+    const operatorId = button.dataset.operatorId;
+    const activityId = button.dataset.activityId;
+
+    if (action === 'save-catalog') saveCatalogDraft(container);
+    if (action === 'add-station') addCatalogStation(container);
+    if (action === 'delete-station') deleteCatalogStation(container, stationId);
+    if (action === 'add-operator') addCatalogOperator(container, stationId);
+    if (action === 'delete-operator') deleteCatalogOperator(container, stationId, operatorId);
+    if (action === 'add-activity') addCatalogActivity(container, stationId, operatorId);
+    if (action === 'delete-activity') deleteCatalogActivity(container, stationId, operatorId, activityId);
+  };
+}
+
+function renderChangeDatabase(container) {
+  const records = readChangeDatabaseLog();
+  const rows = [...records].reverse().map(record => `
+    <tr>
+      <td class="font-mono">${esc(record.fechaHora || '—')}</td>
+      <td>${esc(record.usuario || '—')}</td>
+      <td>${esc(record.area || '—')}</td>
+      <td>${esc(record.linea || '—')}</td>
+      <td>${esc(record.estacion || 'Varias estaciones')}</td>
+      <td>${esc(record.cambio || '—')}</td>
+    </tr>
+  `).join('');
+
+  container.innerHTML = `
+    <div class="page-header catalog-page-header">
+      <div>
+        <h1 class="page-title">Base de Datos de Cambios</h1>
+        <p class="page-subtitle">Historial resumido de guardados realizados desde Catálogo</p>
+      </div>
+      <button class="btn btn--ghost" id="change-log-clear" type="button" ${records.length ? '' : 'disabled'}>Limpiar bitácora</button>
     </div>
 
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">Operaciones</div>
-          <div class="card-subtitle">${ops.length} registradas · ${active} activas · TWC: ${twc} seg · Takt: ${fmt(takt)} seg</div>
+          <div class="card-title">Registros de cambios</div>
+          <div class="card-subtitle">${records.length} registros guardados en esta instalación local</div>
         </div>
-        <button class="btn btn--primary btn--sm" id="btn-add-op">+ Agregar Operación</button>
       </div>
-      <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg);">
-        <table>
-          <thead>
-            <tr>
-              <th style="width:44px">#</th>
-              <th>Actividad</th>
-              <th style="width:130px">Tiempo Est. (s)</th>
-              <th style="width:90px">Estado</th>
-              <th style="width:90px">Orden</th>
-              <th class="td-actions">Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${ops.map((op, i) => `
-              <tr class="${!op.active ? 'row--inactive' : op.standardTime > takt ? 'row--overload' : ''}">
-                <td class="font-mono" style="color:var(--text-muted);font-size:var(--font-12)">${op.sequence}</td>
-                <td>
-                  ${esc(op.name)}
-                  ${op.isTemporary ? '<span class="badge badge--warning" style="margin-left:6px">Temporal</span>' : ''}
-                </td>
-                <td>
-                  <strong class="font-mono" style="${op.standardTime > takt ? 'color:var(--danger)' : ''}">${op.standardTime}</strong>
-                  ${op.standardTime > takt && op.active ? '<span class="badge badge--danger" style="margin-left:4px;font-size:10px">Excede takt</span>' : ''}
-                </td>
-                <td>
-                  ${op.active
-                    ? '<span class="badge badge--success">Activo</span>'
-                    : '<span class="badge badge--neutral">Inactivo</span>'}
-                </td>
-                <td class="td-actions">
-                  <button class="btn btn--ghost btn--sm" data-up-op="${op.id}"${i === 0 ? ' disabled' : ''} title="Subir">↑</button>
-                  <button class="btn btn--ghost btn--sm" data-down-op="${op.id}"${i === ops.length - 1 ? ' disabled' : ''} title="Bajar">↓</button>
-                </td>
-                <td class="td-actions">
-                  <button class="btn btn--ghost btn--sm" data-edit-op="${op.id}">Editar</button>
-                  <button class="btn btn--ghost btn--sm" data-toggle-op="${op.id}">${op.active ? 'Desactivar' : 'Activar'}</button>
-                  <button class="btn btn--ghost btn--sm" style="color:var(--danger)" data-delete-op="${op.id}">Eliminar</button>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
+      <div class="card-body">
+        ${records.length ? `
+          <div class="table-wrapper change-log-table">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:150px">Fecha/hora</th>
+                  <th style="width:130px">Usuario</th>
+                  <th style="width:120px">Área</th>
+                  <th style="width:180px">Línea</th>
+                  <th style="width:150px">Estación</th>
+                  <th>Cambio</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        ` : `
+          <div class="change-log-empty">No hay cambios registrados todavía.</div>
+        `}
       </div>
     </div>
   `;
 
-  document.getElementById('btn-add-op').addEventListener('click', () => openOperationModal());
-  container.querySelectorAll('[data-edit-op]').forEach(btn =>
-    btn.addEventListener('click', () => openOperationModal(btn.dataset.editOp)));
-  container.querySelectorAll('[data-delete-op]').forEach(btn =>
-    btn.addEventListener('click', () => confirmDeleteOp(btn.dataset.deleteOp)));
-  container.querySelectorAll('[data-toggle-op]').forEach(btn =>
-    btn.addEventListener('click', () => toggleOperationActive(btn.dataset.toggleOp)));
-  container.querySelectorAll('[data-up-op]').forEach(btn =>
-    btn.addEventListener('click', () => moveOperation(btn.dataset.upOp, -1)));
-  container.querySelectorAll('[data-down-op]').forEach(btn =>
-    btn.addEventListener('click', () => moveOperation(btn.dataset.downOp, 1)));
+  container.querySelector('#change-log-clear')?.addEventListener('click', () => {
+    showConfirm(
+      'Limpiar bitácora',
+      '¿Seguro que deseas limpiar la Base de Datos de Cambios? Esta acción no borra el Catálogo ni otros datos.',
+      () => {
+        clearChangeDatabaseLog();
+        renderChangeDatabase(container);
+        showToast('Base de Datos de Cambios limpiada', 'success');
+      }
+    );
+  });
 }
 
 function renderStandardTimes(container) {
@@ -2953,6 +3924,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const headerLine  = document.getElementById('header-line');
   if (headerPlant) headerPlant.textContent = state.plant.name;
   if (headerLine)  headerLine.textContent  = state.line.name;
+  renderAuthWidget();
 
   renderApp();
 });

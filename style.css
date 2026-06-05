@@ -299,6 +299,40 @@ a { text-decoration: none; color: inherit; }
   color: var(--green-700);
 }
 
+.auth-widget {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.auth-session {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface-bg);
+}
+
+.auth-user-label {
+  padding-left: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--font-12);
+  white-space: nowrap;
+}
+
+.login-error {
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  font-size: var(--font-12);
+  font-weight: 600;
+}
+
 /* ── Main content ── */
 .main-content {
   flex: 1;
@@ -508,6 +542,10 @@ a { text-decoration: none; color: inherit; }
   font-size: var(--font-12);
   font-weight: 700;
   color: var(--text-primary);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dashboard-chart-takt {
@@ -987,6 +1025,265 @@ tbody tr.row--warning { background: #FFFBEB; }
   font-size: var(--font-12);
   color: var(--text-muted);
   margin-top: var(--sp-1);
+}
+
+/* ── Catalog line structure ── */
+.catalog-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.catalog-initial-message {
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--info);
+  border-radius: var(--radius-md);
+  background: var(--info-bg);
+  color: var(--info-text);
+  font-size: var(--font-14);
+  font-weight: 500;
+}
+
+.catalog-structure-card .card-body {
+  padding: 0;
+}
+
+.catalog-station-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.catalog-station {
+  border-bottom: 1px solid var(--border);
+}
+
+.catalog-station:last-child {
+  border-bottom: none;
+}
+
+.catalog-station-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  cursor: pointer;
+  list-style: none;
+}
+
+.catalog-station-summary::-webkit-details-marker {
+  display: none;
+}
+
+.catalog-station-summary::before {
+  content: '›';
+  color: var(--text-muted);
+  font-size: var(--font-18);
+  line-height: 1;
+  transition: transform var(--transition);
+}
+
+.catalog-station[open] .catalog-station-summary::before {
+  transform: rotate(90deg);
+}
+
+.catalog-station-title {
+  flex: 1;
+  min-width: 220px;
+}
+
+.catalog-station-name {
+  width: 100%;
+  max-width: 360px;
+  font-weight: 700;
+}
+
+.catalog-station-meta {
+  color: var(--text-muted);
+  font-size: var(--font-12);
+  font-weight: 600;
+  min-width: 130px;
+}
+
+.catalog-station-body {
+  padding: 0 var(--sp-5) var(--sp-5) calc(var(--sp-5) + var(--sp-4));
+}
+
+.catalog-total-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface-bg);
+  color: var(--text-muted);
+  font-size: var(--font-12);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.catalog-total-pill strong {
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.catalog-empty-operators {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-bg);
+  color: var(--text-muted);
+}
+
+.catalog-empty-operators p {
+  font-size: var(--font-14);
+  font-weight: 500;
+}
+
+.catalog-empty-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  color: var(--text-muted);
+}
+
+.catalog-operator-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+
+.catalog-operator {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+.catalog-operator-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-bg);
+}
+
+.catalog-operator-fields {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(160px, 260px) minmax(220px, 1fr);
+  gap: var(--sp-3);
+  align-items: end;
+}
+
+.catalog-operator-title,
+.catalog-operator-subset {
+  min-width: 0;
+}
+
+.catalog-operator-name,
+.catalog-subset-input {
+  width: 100%;
+  font-weight: 700;
+}
+
+.catalog-operator-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.catalog-activity-table {
+  border: none;
+  border-radius: 0;
+}
+
+.catalog-activity-table tbody tr:hover {
+  background: var(--surface-card);
+}
+
+.catalog-activity-number {
+  color: var(--text-muted);
+  font-size: var(--font-12);
+}
+
+.catalog-time-input {
+  width: 110px;
+}
+
+.catalog-empty-table-cell {
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.catalog-operator-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.change-log-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-bg);
+  color: var(--text-muted);
+  font-size: var(--font-14);
+  font-weight: 500;
+  text-align: center;
+}
+
+.change-log-table td:last-child {
+  min-width: 280px;
+}
+
+@media (max-width: 760px) {
+  .catalog-page-header,
+  .catalog-station-summary,
+  .catalog-empty-operators,
+  .catalog-empty-line,
+  .catalog-operator-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .catalog-station-title,
+  .catalog-station-name,
+  .catalog-operator-name,
+  .catalog-subset-input,
+  .catalog-time-input {
+    max-width: none;
+    width: 100%;
+  }
+
+  .catalog-operator-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-station-body {
+    padding: 0 var(--sp-4) var(--sp-4);
+  }
+
+  .catalog-total-pill {
+    justify-content: space-between;
+  }
 }
 
 /* Inactive table rows */
