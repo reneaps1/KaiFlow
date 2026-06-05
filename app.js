@@ -2097,12 +2097,14 @@ function renderTSRecordsSection(container) {
           <div class="card-title">Estudios guardados</div>
           <span class="badge badge--neutral">${studies.length}</span>
         </div>
-        <div class="btn-group">
-          <button class="btn btn--secondary btn--sm" id="ts-export-all" title="Exportar todos los estudios como JSON">Exportar todos</button>
+        <div class="btn-group" style="flex-wrap:wrap;gap:var(--sp-2)">
+          <button class="btn btn--secondary btn--sm" id="ts-export-all" title="Exportar todos los estudios como JSON">Exportar todos JSON</button>
           <label class="btn btn--secondary btn--sm" style="cursor:pointer" title="Importar estudios desde JSON">
             Importar JSON
             <input type="file" accept=".json,application/json" style="display:none" id="ts-import-input" />
           </label>
+          <button class="btn btn--secondary btn--sm" id="ts-export-all-csv" title="Exportar todos los estudios como CSV">Exportar todos CSV</button>
+          <button class="btn btn--secondary btn--sm" id="ts-export-summary-csv" title="Exportar resumen de estudios como CSV">Exportar resumen CSV</button>
         </div>
       </div>
       <div class="card-body" style="border-bottom:1px solid var(--border);padding-bottom:var(--sp-4)">
@@ -2209,7 +2211,8 @@ function renderTSRecordsSection(container) {
               <button class="btn btn--ghost btn--sm" data-ts-action="view"      data-study-id="${esc(s.id)}" title="Ver detalle">Ver</button>
               <button class="btn btn--ghost btn--sm" data-ts-action="edit"      data-study-id="${esc(s.id)}" title="Editar">Editar</button>
               <button class="btn btn--ghost btn--sm" data-ts-action="duplicate" data-study-id="${esc(s.id)}" title="Duplicar">Duplicar</button>
-              <button class="btn btn--ghost btn--sm" data-ts-action="export"    data-study-id="${esc(s.id)}" title="Exportar JSON">Exportar</button>
+              <button class="btn btn--ghost btn--sm" data-ts-action="export"     data-study-id="${esc(s.id)}" title="Exportar JSON">Exportar JSON</button>
+              <button class="btn btn--ghost btn--sm" data-ts-action="export-csv" data-study-id="${esc(s.id)}" title="Exportar CSV">Exportar CSV</button>
               <button class="btn btn--ghost btn--sm ts-btn-danger" data-ts-action="delete" data-study-id="${esc(s.id)}" title="Eliminar">Eliminar</button>
             </div>
           </td>
@@ -2224,8 +2227,9 @@ function renderTSRecordsSection(container) {
         if      (action === 'view')      openTimeStudyDetailModal(id);
         else if (action === 'edit')      openEditTimeStudyModal(id, () => renderTSRecordsSection(container));
         else if (action === 'duplicate') { tsDuplicateStudy(id); renderTSRecordsSection(container); }
-        else if (action === 'export')    tsExportStudy(id);
-        else if (action === 'delete')    tsDeleteStudy(id, container);
+        else if (action === 'export')     tsExportStudy(id);
+        else if (action === 'export-csv') tsExportStudyCsv(id);
+        else if (action === 'delete')     tsDeleteStudy(id, container);
       });
     });
   };
@@ -2246,6 +2250,8 @@ function renderTSRecordsSection(container) {
   });
 
   container.querySelector('#ts-export-all')?.addEventListener('click', tsExportAllStudies);
+  container.querySelector('#ts-export-all-csv')?.addEventListener('click', tsExportAllStudiesCsv);
+  container.querySelector('#ts-export-summary-csv')?.addEventListener('click', tsExportStudiesSummaryCsv);
   _bindTSImportInput(container, container);
 }
 
@@ -2426,6 +2432,23 @@ function openTimeStudyDetailModal(studyId) {
     `;
   }).join('');
 
+  const completedStepsForPrep = steps.filter(s => s.isComplete);
+  const completedStepsRows = completedStepsForPrep.length > 0
+    ? completedStepsForPrep.map(step => {
+        const taken = (step.captures || []).length;
+        const avg = step.averageTime != null ? fmtMs(step.averageTime) : '—';
+        return `
+          <tr>
+            <td>${esc(step.name)}</td>
+            <td class="text-right">${taken}</td>
+            <td class="text-right font-mono">${avg}</td>
+            <td><span class="badge badge--success">Completo</span></td>
+            <td><span class="badge badge--success">Listo para usar</span></td>
+          </tr>
+        `;
+      }).join('')
+    : `<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:var(--sp-4)">No hay pasos completados</td></tr>`;
+
   openModal(esc(study.name), `
     <div style="padding:var(--sp-5) var(--sp-6)">
       <div style="display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin-bottom:var(--sp-4)">
@@ -2481,6 +2504,35 @@ function openTimeStudyDetailModal(studyId) {
           <tbody>${stepRows || '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Sin pasos</td></tr>'}</tbody>
         </table>
       </div>
+
+      ${isCompleted ? `
+      <div style="margin-bottom:var(--sp-5);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+        <div style="background:var(--surface-2,#f8f9fa);padding:var(--sp-3) var(--sp-4);display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;border-bottom:1px solid var(--border)">
+          <div>
+            <div style="font-weight:600;font-size:var(--font-14)">Preparación para tiempos estándar</div>
+            <div style="font-size:var(--font-12);color:var(--text-muted)">Vista previa de los datos disponibles para integración futura</div>
+          </div>
+          <button class="btn btn--secondary btn--sm" disabled title="Disponible en la siguiente fase">Enviar a tiempos estándar</button>
+        </div>
+        <div style="overflow-x:auto">
+          <table class="time-study-table">
+            <thead>
+              <tr>
+                <th>Paso</th>
+                <th class="text-right" style="width:80px">Capturas</th>
+                <th class="text-right" style="width:100px">Promedio</th>
+                <th style="width:90px">Estado</th>
+                <th style="width:120px">Disponibilidad</th>
+              </tr>
+            </thead>
+            <tbody>${completedStepsRows}</tbody>
+          </table>
+        </div>
+        <div style="padding:var(--sp-3) var(--sp-4);background:var(--surface-2,#f8f9fa);border-top:1px solid var(--border);font-size:var(--font-12);color:var(--text-muted)">
+          La integración con tiempos estándar estará disponible en la siguiente fase.
+        </div>
+      </div>
+      ` : ''}
 
       <div class="modal-actions" style="margin-top:0">
         <button class="btn btn--ghost" id="tsd-close">Cerrar</button>
@@ -3009,6 +3061,121 @@ function _bindTSImportInput(container, sectionContainer) {
     };
     reader.readAsText(file);
   });
+}
+
+// ── Time Study: Phase 6 — CSV export ──────────
+
+function tsEscapeCsvValue(value) {
+  if (value == null) return '';
+  const str = String(value);
+  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
+    return '"' + str.replace(/"/g, '""') + '"';
+  }
+  return str;
+}
+
+function tsDownloadTextFile(filename, content) {
+  const BOM = '﻿';
+  const blob = new Blob([BOM + content], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+const TS_CSV_DETAIL_HEADERS = [
+  'study_id','study_name','study_status',
+  'study_created_at','study_updated_at','study_completed_at',
+  'step_id','step_name','step_required_captures','step_is_complete',
+  'step_average_time_ms','step_average_time_formatted',
+  'capture_id','capture_label','capture_value_ms','capture_value_formatted','capture_created_at'
+];
+
+function tsStudyToCsvRows(study) {
+  const rows = [];
+  for (const step of (study.steps || [])) {
+    const captures = step.captures || [];
+    const baseRow = [
+      study.id, study.name, study.status,
+      study.createdAt || '', study.updatedAt || '', study.completedAt || '',
+      step.id, step.name, step.requiredCaptures || 0, step.isComplete ? 'true' : 'false',
+      step.averageTime != null ? step.averageTime : '',
+      step.averageTime != null ? fmtMs(step.averageTime) : ''
+    ];
+    if (captures.length === 0) {
+      rows.push([...baseRow, '', '', '', '', ''].map(tsEscapeCsvValue).join(','));
+    } else {
+      for (const cap of captures) {
+        rows.push([
+          ...baseRow,
+          cap.id || '', cap.label || '',
+          cap.valueMs != null ? cap.valueMs : '',
+          cap.valueMs != null ? fmtMs(cap.valueMs) : '',
+          cap.createdAt || ''
+        ].map(tsEscapeCsvValue).join(','));
+      }
+    }
+  }
+  return rows;
+}
+
+function tsStudiesToCsv(studies) {
+  const rows = [];
+  for (const study of studies) rows.push(...tsStudyToCsvRows(study));
+  return [TS_CSV_DETAIL_HEADERS.join(','), ...rows].join('\r\n');
+}
+
+const TS_CSV_SUMMARY_HEADERS = [
+  'study_id','study_name','study_status',
+  'created_at','updated_at','completed_at',
+  'total_steps','completed_steps','pending_steps',
+  'total_required_captures','total_taken_captures','progress_percent',
+  'total_average_time_ms','total_average_time_formatted'
+];
+
+function tsStudiesSummaryToCsv(studies) {
+  const rows = studies.map(study => {
+    const steps = study.steps || [];
+    const completedSteps = steps.filter(s => s.isComplete).length;
+    const totalRequired = steps.reduce((sum, s) => sum + (s.requiredCaptures || 0), 0);
+    const totalTaken = steps.reduce((sum, s) => sum + (s.captures || []).length, 0);
+    const pct = totalRequired > 0 ? Math.round((totalTaken / totalRequired) * 100) : 0;
+    const totalAvg = tsCalculateTotalAvg(study);
+    return [
+      study.id, study.name, study.status,
+      study.createdAt || '', study.updatedAt || '', study.completedAt || '',
+      steps.length, completedSteps, steps.length - completedSteps,
+      totalRequired, totalTaken, pct,
+      totalAvg != null ? totalAvg : '',
+      totalAvg != null ? fmtMs(totalAvg) : ''
+    ].map(tsEscapeCsvValue).join(',');
+  });
+  return [TS_CSV_SUMMARY_HEADERS.join(','), ...rows].join('\r\n');
+}
+
+function tsExportStudyCsv(studyId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return;
+  tsDownloadTextFile(`estudio-tiempo-${sanitizeFilename(study.name)}.csv`, tsStudiesToCsv([study]));
+  showToast(`Estudio "${study.name}" exportado como CSV`, 'success');
+}
+
+function tsExportAllStudiesCsv() {
+  const studies = state.timeStudies || [];
+  if (studies.length === 0) { showToast('No hay estudios para exportar', 'warning'); return; }
+  tsDownloadTextFile('kaiflow-estudios-tiempo.csv', tsStudiesToCsv(studies));
+  showToast(`${studies.length} estudio(s) exportados como CSV`, 'success');
+}
+
+function tsExportStudiesSummaryCsv() {
+  const studies = state.timeStudies || [];
+  if (studies.length === 0) { showToast('No hay estudios para exportar', 'warning'); return; }
+  tsDownloadTextFile('kaiflow-estudios-tiempo-resumen.csv', tsStudiesSummaryToCsv(studies));
+  showToast(`Resumen de ${studies.length} estudio(s) exportado como CSV`, 'success');
 }
 
 // ── Stopwatch: core ───────────────────────────
