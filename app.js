@@ -65,6 +65,30 @@ const CATALOG_DATA_STORAGE_KEY = 'catalogDataByLine';
 const CATALOG_PLANT_NAME = 'Fujikura Puebla';
 const ACTIVE_USER_STORAGE_KEY = 'kaiflowActiveUser';
 const CHANGE_DATABASE_STORAGE_KEY = 'changeDatabaseLog';
+const STANDARD_TIMES_STORAGE_KEY = 'standardTimesData';
+const standardTimesBaseData = [
+  { id: 'STD-001', area: 'Montaje', tipo: 'General', actividad: 'Tomar y escanear', tiempoSeg: 4.4 },
+  { id: 'STD-002', area: 'Montaje', tipo: 'General', actividad: 'Seleccionar planificación', tiempoSeg: 2.7 },
+  { id: 'STD-003', area: 'Montaje', tipo: 'General', actividad: 'Colocar etiqueta', tiempoSeg: 13.0 },
+  { id: 'STD-004', area: 'Montaje', tipo: 'General', actividad: 'Enrollar manualmente cables (Diam. aro =600mm)', tiempoSeg: 6.8 },
+  { id: 'STD-005', area: 'Montaje', tipo: 'General', actividad: 'Colocar liga', tiempoSeg: 7.5 },
+  { id: 'STD-006', area: 'Montaje', tipo: 'General', actividad: 'Empaque / colgar SUB', tiempoSeg: 4.8 },
+  { id: 'STD-007', area: 'Montaje', tipo: 'General', actividad: 'Empaque / colgar TRAMADA', tiempoSeg: 15.9 },
+  { id: 'STD-008', area: 'Montaje', tipo: 'General', actividad: 'Empaque / colgar RSK', tiempoSeg: 15.9 },
+  { id: 'STD-009', area: 'Montaje', tipo: 'Conector', actividad: 'Tomar conector y colocar en contra', tiempoSeg: 3.4 },
+  { id: 'STD-010', area: 'Montaje', tipo: 'Conector', actividad: 'Colocar tapón en conector', tiempoSeg: 4.7 },
+  { id: 'STD-011', area: 'Montaje', tipo: 'Conector', actividad: 'Seleccionar circuito', tiempoSeg: 2.5 },
+  { id: 'STD-012', area: 'Montaje', tipo: 'Conector', actividad: 'Encliquetar circuito + PULL', tiempoSeg: 3.6 },
+  { id: 'STD-013', area: 'Montaje', tipo: 'Conector', actividad: 'Encliquetar circuito + PULL con dificultad', tiempoSeg: 5.4 },
+  { id: 'STD-014', area: 'Montaje', tipo: 'Conector', actividad: 'Encliquetar terminal de u.s. +PULL', tiempoSeg: 4.0 },
+  { id: 'STD-015', area: 'Montaje', tipo: 'Conector', actividad: 'Realizar prueba de continuidad', tiempoSeg: 2.6 },
+  { id: 'STD-016', area: 'Montaje', tipo: 'Conector', actividad: 'Desmontar', tiempoSeg: 7.1 },
+  { id: 'STD-017', area: 'Montaje', tipo: 'Conector', actividad: 'Cerrar seguridad', tiempoSeg: 1.8 },
+  { id: 'STD-018', area: 'Montaje', tipo: 'Conector', actividad: 'Colocar seguridad a conector', tiempoSeg: 4.3 },
+  { id: 'STD-019', area: 'Montaje', tipo: 'Conector', actividad: 'Coger y colocar capuchón en conector', tiempoSeg: 9.0 },
+  { id: 'STD-020', area: 'Montaje', tipo: 'Conector', actividad: 'Colocar gomas', tiempoSeg: 10.3 },
+  { id: 'STD-021', area: 'Montaje', tipo: 'Conector', actividad: 'Cerrar tapa a conector', tiempoSeg: 5.4 }
+];
 const LOCAL_AUTH_USERS = [
   { username: 'admin', password: '1234', displayName: 'Administrador' },
   { username: 'supervisor', password: '1234', displayName: 'Supervisor' },
@@ -763,9 +787,29 @@ function ensureDashboardState() {
 
 function getDashboardLineConfig(area, line) {
   ensureDashboardState();
+  const draft = getDashboardDraftConfig(area, line);
+  if (draft) return draft;
   const store = readDashboardConfigStore();
   const saved = store[dashboardLineKey(area, line)];
   return saved ? normalizeDashboardConfig(saved, area, line) : getDefaultDashboardConfig(area, line);
+}
+
+function getDashboardDraftConfig(area, line) {
+  const draftStore = state.dashboardDraftConfigs || {};
+  const draft = draftStore[dashboardLineKey(area, line)];
+  return draft ? normalizeDashboardConfig(draft, area, line) : null;
+}
+
+function setDashboardDraftConfig(config) {
+  const line = config.linea || config.line;
+  const normalized = normalizeDashboardConfig(config, config.area, line);
+  state.dashboardDraftConfigs = state.dashboardDraftConfigs || {};
+  state.dashboardDraftConfigs[dashboardLineKey(normalized.area, normalized.linea)] = normalized;
+}
+
+function clearDashboardDraftConfig(area, line) {
+  if (!state.dashboardDraftConfigs) return;
+  delete state.dashboardDraftConfigs[dashboardLineKey(area, line)];
 }
 
 function saveDashboardLineConfig(config) {
@@ -782,6 +826,7 @@ function saveDashboardLineConfig(config) {
     graficoPor: normalized.graficoPor
   };
   writeDashboardConfigStore(store);
+  clearDashboardDraftConfig(normalized.area, normalized.linea);
 }
 
 function getDashboardCatalog(area, line) {
@@ -824,6 +869,125 @@ function getDashboardSubsetRows(catalog) {
   return Object.keys(subsetTotals)
     .sort((a, b) => a.localeCompare(b, 'es'))
     .map(label => ({ label, time: subsetTotals[label] }));
+}
+
+function getSelectedDashboardContext() {
+  ensureDashboardState();
+  const area = state.dashboardSelection?.area || DASHBOARD_DEFAULT_AREA;
+  const line = state.dashboardSelection?.line || DASHBOARD_DEFAULT_LINE;
+  return {
+    planta: CATALOG_PLANT_NAME,
+    area,
+    line,
+    linea: line
+  };
+}
+
+function getCatalogForDashboardSelection(area, line) {
+  const context = area && line ? { area, line } : getSelectedDashboardContext();
+  return getDashboardCatalog(context.area, context.line);
+}
+
+function mapObjectTotalsToRows(totals) {
+  return Object.keys(totals)
+    .sort((a, b) => a.localeCompare(b, 'es'))
+    .map(label => ({ label, time: totals[label] }));
+}
+
+function getCatalogLineSummary(area, line) {
+  const context = area && line
+    ? { planta: CATALOG_PLANT_NAME, area, line, linea: line }
+    : getSelectedDashboardContext();
+  const catalog = getCatalogForDashboardSelection(context.area, context.line);
+  const operatorTotals = {};
+  const subsetTotals = {};
+  const uniqueOperators = new Set();
+  const uniqueSubsets = new Set();
+  let totalOperators = 0;
+  let totalActivities = 0;
+  let lineTotal = 0;
+
+  const stationLoads = (catalog?.estaciones || []).map((station, stationIndex) => {
+    const stationName = String(station.nombre || '').trim() || `Estación ${stationIndex + 1}`;
+    let stationTotal = 0;
+    const operadores = (station.operadores || []).map((operator, operatorIndex) => {
+      const operatorName = String(operator.nombre || '').trim() || `OP${operatorIndex + 1}`;
+      const subconjunto = String(operator.subconjunto || '').trim() || 'Sin subconjunto';
+      const actividades = (operator.actividades || []).map((activity, activityIndex) => ({
+        id: activity.id || `activity-${activityIndex + 1}`,
+        no: activity.no || activityIndex + 1,
+        actividad: String(activity.actividad || activity.name || activity.nombre || '').trim(),
+        tiempo: catalogSeconds(activity.tiempo ?? activity.time ?? activity.standardTime)
+      }));
+      const operatorTime = actividades.reduce((sum, activity) => sum + activity.tiempo, 0);
+
+      totalOperators += 1;
+      totalActivities += actividades.length;
+      stationTotal += operatorTime;
+      uniqueOperators.add(operatorName);
+      if (subconjunto !== 'Sin subconjunto') uniqueSubsets.add(subconjunto);
+      operatorTotals[operatorName] = (operatorTotals[operatorName] || 0) + operatorTime;
+      subsetTotals[subconjunto] = (subsetTotals[subconjunto] || 0) + operatorTime;
+
+      return {
+        id: operator.id || `operator-${operatorIndex + 1}`,
+        nombre: operatorName,
+        subconjunto,
+        actividades,
+        activityCount: actividades.length,
+        time: operatorTime
+      };
+    });
+    const subconjuntos = [...new Set(operadores.map(operator => operator.subconjunto).filter(Boolean))];
+    lineTotal += stationTotal;
+
+    return {
+      id: station.id || `station-${stationIndex + 1}`,
+      nombre: stationName,
+      time: stationTotal,
+      total: stationTotal,
+      operadores,
+      operatorCount: operadores.length,
+      operadoresLabel: operadores.length
+        ? operadores.map(operator => operator.nombre).join(', ')
+        : 'Sin operadores',
+      subconjuntos,
+      subconjuntosLabel: subconjuntos.length
+        ? subconjuntos.join(', ')
+        : 'Sin subconjuntos'
+    };
+  });
+
+  return {
+    catalog,
+    planta: context.planta,
+    area: context.area,
+    line: context.line,
+    linea: context.line,
+    hasCatalog: !!catalog,
+    hasOperationalData: !!catalog && totalOperators > 0 && totalActivities > 0,
+    totalTiempo: lineTotal,
+    totalStations: stationLoads.length,
+    totalOperators,
+    totalActivities,
+    totalOperatorsUnique: uniqueOperators.size,
+    totalSubsetsUnique: uniqueSubsets.size,
+    stationLoads,
+    operatorLoads: mapObjectTotalsToRows(operatorTotals),
+    subconjuntoLoads: mapObjectTotalsToRows(subsetTotals)
+  };
+}
+
+function getStationLoadsFromCatalog(area, line) {
+  return getCatalogLineSummary(area, line).stationLoads;
+}
+
+function getOperatorLoadsFromCatalog(area, line) {
+  return getCatalogLineSummary(area, line).operatorLoads;
+}
+
+function getSubconjuntoLoadsFromCatalog(area, line) {
+  return getCatalogLineSummary(area, line).subconjuntoLoads;
 }
 
 function computeDashboardMetrics(config, catalog) {
@@ -1224,8 +1388,13 @@ function renderDashboard(container) {
     graficoPor: graphByEl.value
   });
 
+  const persistDashboardDraft = () => {
+    setDashboardDraftConfig(readDraft());
+  };
+
   const refreshDashboard = () => {
     const draft = readDraft();
+    setDashboardDraftConfig(draft);
     const catalog = getDashboardCatalog(draft.area, draft.line);
     const metrics = computeDashboardMetrics(draft, catalog);
     const chartRows = draft.graficoPor === 'operator'
@@ -1249,6 +1418,7 @@ function renderDashboard(container) {
   };
 
   areaEl.addEventListener('change', () => {
+    persistDashboardDraft();
     state.dashboardSelection.area = areaEl.value;
     state.dashboardSelection.line = DASHBOARD_LINES_BY_AREA[areaEl.value][0];
     saveState();
@@ -1256,6 +1426,7 @@ function renderDashboard(container) {
   });
 
   lineEl.addEventListener('change', () => {
+    persistDashboardDraft();
     state.dashboardSelection.line = lineEl.value;
     saveState();
     renderDashboard(container);
@@ -1285,21 +1456,98 @@ function getCatalogStationOperatorLabel(station) {
   return operatorNames.length ? operatorNames.join(', ') : 'Sin operadores';
 }
 
+function normalizeSuggestionText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+}
+
+function getStandardTimeActivitySuggestions(query) {
+  const normalizedQuery = normalizeSuggestionText(query);
+  if (!normalizedQuery) return [];
+  return readStandardTimesData()
+    .filter(item => normalizeSuggestionText(item.actividad).includes(normalizedQuery))
+    .slice(0, 8);
+}
+
+function renderCatalogActivitySuggestions(input) {
+  const wrapper = input.closest('.catalog-activity-autocomplete');
+  const menu = wrapper?.querySelector('[data-standard-time-suggestions]');
+  if (!menu) return;
+  const suggestions = getStandardTimeActivitySuggestions(input.value);
+
+  if (!input.value.trim()) {
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+    return;
+  }
+
+  menu.classList.remove('hidden');
+  menu.innerHTML = suggestions.length
+    ? suggestions.map(item => `
+      <button
+        class="catalog-activity-suggestion"
+        type="button"
+        data-standard-time-suggestion="${esc(item.id)}"
+        data-station-id="${esc(input.dataset.stationId)}"
+        data-operator-id="${esc(input.dataset.operatorId)}"
+        data-activity-id="${esc(input.dataset.activityId)}"
+      >
+        <span class="catalog-activity-suggestion-name">${esc(item.actividad)}</span>
+        <span class="catalog-activity-suggestion-meta">${fmt(item.tiempoSeg, 1)} s · ${esc(item.tipo || item.area || 'Tiempos Estándar')}</span>
+      </button>
+    `).join('')
+    : '<div class="catalog-activity-suggestion-empty">Sin coincidencias</div>';
+}
+
+function closeCatalogActivitySuggestions(container) {
+  container.querySelectorAll('[data-standard-time-suggestions]').forEach(menu => {
+    menu.classList.add('hidden');
+    menu.innerHTML = '';
+  });
+}
+
+function selectCatalogActivitySuggestion(container, button) {
+  const item = readStandardTimesData().find(row => row.id === button.dataset.standardTimeSuggestion);
+  if (!item) return;
+
+  const row = button.closest('tr');
+  const activityInput = row?.querySelector('[data-catalog-action="activity-name"]');
+  const timeInput = row?.querySelector('[data-catalog-action="activity-time"]');
+  const activity = findCatalogActivity(button.dataset.stationId, button.dataset.operatorId, button.dataset.activityId);
+
+  if (activityInput) activityInput.value = item.actividad;
+  if (timeInput) timeInput.value = item.tiempoSeg;
+  if (activity) {
+    activity.actividad = item.actividad;
+    activity.tiempo = item.tiempoSeg;
+  }
+
+  closeCatalogActivitySuggestions(container);
+  refreshCatalogEditorTotals(container);
+  timeInput?.focus();
+}
+
 function renderCatalogActivityRow(station, operator, activity, index) {
   return `
     <tr>
       <td class="font-mono catalog-activity-number">${index + 1}</td>
       <td>
-        <input
-          class="form-input w-full"
-          data-catalog-action="activity-name"
-          data-station-id="${esc(station.id)}"
-          data-operator-id="${esc(operator.id)}"
-          data-activity-id="${esc(activity.id)}"
-          type="text"
-          value="${esc(activity.actividad || '')}"
-          placeholder="Actividad"
-        />
+        <div class="catalog-activity-autocomplete">
+          <input
+            class="form-input w-full"
+            data-catalog-action="activity-name"
+            data-station-id="${esc(station.id)}"
+            data-operator-id="${esc(operator.id)}"
+            data-activity-id="${esc(activity.id)}"
+            type="text"
+            value="${esc(activity.actividad || '')}"
+            placeholder="Actividad"
+            autocomplete="off"
+          />
+          <div class="catalog-activity-suggestions hidden" data-standard-time-suggestions></div>
+        </div>
       </td>
       <td>
         <input
@@ -1621,6 +1869,7 @@ function handleCatalogInput(container, input) {
   if (action === 'activity-name') {
     const activity = findCatalogActivity(stationId, operatorId, activityId);
     if (activity) activity.actividad = input.value;
+    renderCatalogActivitySuggestions(input);
   }
 
   if (action === 'activity-time') {
@@ -1778,6 +2027,14 @@ function bindCatalogEditor(container) {
   };
 
   container.onclick = event => {
+    const suggestion = event.target.closest('[data-standard-time-suggestion]');
+    if (suggestion && container.contains(suggestion)) {
+      event.preventDefault();
+      event.stopPropagation();
+      selectCatalogActivitySuggestion(container, suggestion);
+      return;
+    }
+
     const button = event.target.closest('button[data-catalog-action]');
     if (!button || !container.contains(button)) return;
 
@@ -1797,6 +2054,22 @@ function bindCatalogEditor(container) {
     if (action === 'add-activity') addCatalogActivity(container, stationId, operatorId);
     if (action === 'delete-activity') deleteCatalogActivity(container, stationId, operatorId, activityId);
   };
+
+  container.addEventListener('focusin', event => {
+    const input = event.target.closest('[data-catalog-action="activity-name"]');
+    if (input) renderCatalogActivitySuggestions(input);
+  });
+
+  container.addEventListener('focusout', event => {
+    const wrapper = event.target.closest('.catalog-activity-autocomplete');
+    if (!wrapper) return;
+    setTimeout(() => {
+      if (!wrapper.contains(document.activeElement)) {
+        const menu = wrapper.querySelector('[data-standard-time-suggestions]');
+        menu?.classList.add('hidden');
+      }
+    }, 0);
+  });
 }
 
 function renderChangeDatabase(container) {
@@ -1866,99 +2139,48 @@ function renderChangeDatabase(container) {
 }
 
 function renderStandardTimes(container) {
-  const ops  = state.operations;
-  const takt = calculateTaktTime(state.balanceSettings);
-  const twc  = calculateTotalWorkContent(getActiveOperations());
-  const efficiency = calculateEfficiency(twc, state.balanceSettings.desiredStations, takt);
-  const overCount  = ops.filter(o => o.active && o.standardTime > takt).length;
+  const rows = readStandardTimesData();
 
   container.innerHTML = `
-    <div class="page-header">
-      <h1 class="page-title">Tiempos Estándar</h1>
-      <p class="page-subtitle">Base de datos oficial · Los cambios se reflejan inmediatamente en el balanceo</p>
-    </div>
-
-    <div class="entity-grid mb-6" style="grid-template-columns:repeat(auto-fill,minmax(170px,1fr))">
-      <div class="entity-card">
-        <div class="entity-card-label">Takt Time</div>
-        <div class="entity-card-name" style="color:var(--green-600)">${fmt(takt)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
-        <div class="entity-card-meta">${state.balanceSettings.requiredQuantity} piezas / turno</div>
+    <div class="page-header standard-times-header">
+      <div>
+        <h1 class="page-title">Tiempos Estándar</h1>
+        <p class="page-subtitle">Tabla global editable de tiempos estándar</p>
       </div>
-      <div class="entity-card">
-        <div class="entity-card-label">Contenido de Trabajo</div>
-        <div class="entity-card-name">${twc}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
-        <div class="entity-card-meta">${getActiveOperations().length} operaciones activas</div>
-      </div>
-      <div class="entity-card">
-        <div class="entity-card-label">Eficiencia</div>
-        <div class="entity-card-name" style="color:${efficiency >= 80 ? 'var(--success)' : efficiency >= 65 ? 'var(--warning)' : 'var(--danger)'}">${fmtPct(efficiency)}</div>
-        <div class="entity-card-meta">${state.balanceSettings.desiredStations} estaciones configuradas</div>
-      </div>
-      <div class="entity-card">
-        <div class="entity-card-label">Ops sobre Takt</div>
-        <div class="entity-card-name" style="color:${overCount > 0 ? 'var(--danger)' : 'var(--success)'}">${overCount}</div>
-        <div class="entity-card-meta">operaciones que exceden el takt</div>
+      <div class="btn-group">
+        <button class="btn btn--secondary" id="std-add-row" type="button">Agregar tiempo estándar</button>
+        <button class="btn btn--ghost" id="std-restore-base" type="button">Restaurar datos base</button>
+        <button class="btn btn--primary" id="std-save-table" type="button">Guardar tiempos estándar</button>
       </div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <div class="card-title">Tiempos por Operación</div>
+        <div>
+          <div class="card-title">Tabla de tiempos estándar</div>
+          <div class="card-subtitle">Datos globales guardados en standardTimesData</div>
+        </div>
       </div>
       <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg);">
-        <table>
+        <table class="standard-times-table">
           <thead>
             <tr>
-              <th style="width:44px">#</th>
-              <th>Nombre de Operación</th>
-              <th style="width:110px">Tiempo (s)</th>
-              <th style="width:80px">Estado</th>
-              <th style="width:115px">Fecha Efectiva</th>
-              <th>Actualizado por</th>
+              <th style="width:18%">Área</th>
+              <th style="width:18%">Tipo</th>
+              <th>Actividad</th>
+              <th style="width:130px">Tiempo Seg</th>
               <th class="td-actions">Acciones</th>
             </tr>
           </thead>
-          <tbody>
-            ${ops.map(op => {
-              const st      = state.standardTimes.find(s => s.operationId === op.id) || {};
-              const pct     = Math.round((op.standardTime / takt) * 100);
-              const overTakt = op.active && op.standardTime > takt;
-              return `
-                <tr class="${!op.active ? 'row--inactive' : overTakt ? 'row--overload' : ''}">
-                  <td class="font-mono" style="color:var(--text-muted);font-size:var(--font-12)">${op.sequence}</td>
-                  <td>
-                    ${esc(op.name)}
-                    ${!op.active ? '<span class="badge badge--neutral" style="margin-left:6px">Inactivo</span>' : ''}
-                    ${op.isTemporary ? '<span class="badge badge--warning" style="margin-left:6px">Temporal</span>' : ''}
-                  </td>
-                  <td>
-                    <strong class="font-mono" style="${overTakt ? 'color:var(--danger)' : ''}">${op.standardTime}</strong>
-                    ${overTakt ? '<span class="badge badge--danger" style="margin-left:4px;font-size:10px">⚠</span>' : ''}
-                  </td>
-                  <td>
-                    ${(st.status ?? 'active') === 'active'
-                      ? '<span class="badge badge--success">Activo</span>'
-                      : '<span class="badge badge--neutral">Inactivo</span>'}
-                  </td>
-                  <td style="font-size:var(--font-12);color:var(--text-muted)">${esc(st.effectiveDate ?? '—')}</td>
-                  <td style="font-size:var(--font-12);color:var(--text-muted)">${esc(st.updatedBy ?? '—')}</td>
-                  <td class="td-actions">
-                    <button class="btn btn--secondary btn--sm" data-edit-time="${op.id}">Editar</button>
-                    <button class="btn btn--ghost btn--sm" data-toggle-std="${op.id}">${(st.status ?? 'active') === 'active' ? 'Inactivar' : 'Activar'}</button>
-                  </td>
-                </tr>
-              `;
-            }).join('')}
+          <tbody id="std-table-body">
+            ${rows.map(renderStandardTimeRow).join('')}
           </tbody>
         </table>
       </div>
     </div>
   `;
 
-  container.querySelectorAll('[data-edit-time]').forEach(btn =>
-    btn.addEventListener('click', () => openEditTimeModal(btn.dataset.editTime)));
-  container.querySelectorAll('[data-toggle-std]').forEach(btn =>
-    btn.addEventListener('click', () => toggleStdTimeStatus(btn.dataset.toggleStd)));
+  bindStandardTimesEvents(container);
 }
 
 function renderTimeStudy(container) {
@@ -3654,7 +3876,163 @@ function _bnkSimApplyReduction(assignments, bottleneckStation, pct) {
   });
 }
 
+function renderCatalogConnectionContextCards(summary) {
+  return `
+    <div class="entity-grid mb-6">
+      <div class="entity-card">
+        <div class="entity-card-label">Planta</div>
+        <div class="entity-card-name">${esc(summary.planta)}</div>
+        <div class="entity-card-meta">Contexto de Catálogo</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Área</div>
+        <div class="entity-card-name">${esc(summary.area)}</div>
+        <div class="entity-card-meta">Última selección del Dashboard</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Línea</div>
+        <div class="entity-card-name">${esc(summary.linea)}</div>
+        <div class="entity-card-meta">Última selección del Dashboard</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Tiempo ciclo total</div>
+        <div class="entity-card-name">${fmtCatalogSeconds(summary.totalTiempo)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
+        <div class="entity-card-meta">Suma de actividades guardadas</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Total estaciones</div>
+        <div class="entity-card-name">${summary.totalStations}</div>
+        <div class="entity-card-meta">Estructura de la línea</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Operadores únicos</div>
+        <div class="entity-card-name">${summary.totalOperatorsUnique}</div>
+        <div class="entity-card-meta">${summary.totalOperators} asignaciones por estación</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Subconjuntos únicos</div>
+        <div class="entity-card-name">${summary.totalSubsetsUnique}</div>
+        <div class="entity-card-meta">Productos capturados</div>
+      </div>
+    </div>`;
+}
+
+function renderCatalogConnectionEmpty() {
+  return `
+    <div class="dashboard-chart-empty catalog-connected-empty">
+      <strong>No hay información de Catálogo para esta línea. Captura y guarda operaciones en Catálogo para visualizar este módulo.</strong>
+    </div>`;
+}
+
+function renderBalanceOperatorRows(summary) {
+  return summary.stationLoads.flatMap(station => {
+    if (!station.operadores.length) {
+      return [`
+        <tr>
+          <td><strong>${esc(station.nombre)}</strong></td>
+          <td>Sin operadores</td>
+          <td>Sin subconjunto</td>
+          <td>0 actividades</td>
+          <td class="font-mono">0.00 s</td>
+          <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
+        </tr>`];
+    }
+
+    return station.operadores.map(operator => {
+      const namedActivities = operator.actividades
+        .map(activity => activity.actividad)
+        .filter(Boolean)
+        .slice(0, 3);
+      const activityLabel = namedActivities.length
+        ? `${operator.activityCount} act. · ${namedActivities.join(', ')}${operator.activityCount > namedActivities.length ? '...' : ''}`
+        : `${operator.activityCount} actividades`;
+
+      return `
+        <tr>
+          <td><strong>${esc(station.nombre)}</strong></td>
+          <td>${esc(operator.nombre)}</td>
+          <td>${esc(operator.subconjunto)}</td>
+          <td>${esc(activityLabel)}</td>
+          <td class="font-mono">${fmtCatalogSeconds(operator.time)} s</td>
+          <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
+        </tr>`;
+    });
+  }).join('');
+}
+
+function renderBalanceStationRows(summary) {
+  return summary.stationLoads.map(station => `
+    <tr>
+      <td><strong>${esc(station.nombre)}</strong></td>
+      <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
+      <td>${esc(station.operadoresLabel)}</td>
+      <td>${esc(station.subconjuntosLabel)}</td>
+    </tr>
+  `).join('');
+}
+
 function renderBalance(container) {
+  const summary = getCatalogLineSummary();
+
+  container.innerHTML = `
+    <div class="page-header">
+      <h1 class="page-title">Balanceo de Línea</h1>
+      <p class="page-subtitle">Distribución conectada al Catálogo guardado por línea</p>
+    </div>
+
+    ${renderCatalogConnectionContextCards(summary)}
+
+    ${!summary.hasOperationalData ? renderCatalogConnectionEmpty() : `
+      <div class="card mb-6">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Distribución por estación y operador</div>
+            <div class="card-subtitle">Fuente: catalogDataByLine · ${esc(summary.area)} / ${esc(summary.linea)}</div>
+          </div>
+        </div>
+        <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
+          <table>
+            <thead>
+              <tr>
+                <th>Estación</th>
+                <th>Operador</th>
+                <th>Subconjunto</th>
+                <th>Actividades</th>
+                <th>Tiempo operador</th>
+                <th>Tiempo estación</th>
+              </tr>
+            </thead>
+            <tbody>${renderBalanceOperatorRows(summary)}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Resumen por estación</div>
+            <div class="card-subtitle">Carga total, operadores y subconjuntos relacionados</div>
+          </div>
+        </div>
+        <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
+          <table>
+            <thead>
+              <tr>
+                <th>Estación</th>
+                <th>Tiempo total</th>
+                <th>Operadores</th>
+                <th>Subconjuntos</th>
+              </tr>
+            </thead>
+            <tbody>${renderBalanceStationRows(summary)}</tbody>
+          </table>
+        </div>
+      </div>
+    `}
+  `;
+}
+
+function renderBalanceLegacy(container) {
   const s         = state.balanceSettings;
   const ops       = getActiveOperations();
   const takt      = calculateTaktTime(s);
@@ -4055,7 +4433,173 @@ function _yamazumiSummaryRows(cv, takt) {
   }).join('');
 }
 
+function getCatalogYamazumiTakt(summary) {
+  const config = getDashboardLineConfig(summary.area, summary.line);
+  const piezasPorHora = Math.max(0, Number(config.piezasPorHora) || 0);
+  return piezasPorHora > 0 ? 3600 / piezasPorHora : 0;
+}
+
+function renderCatalogYamazumiChart(summary, takt) {
+  const chartHeight = 300;
+  const labelHeight = 58;
+  const totalHeight = chartHeight + labelHeight;
+  const maxLoad = Math.max(...summary.stationLoads.map(station => station.time), takt || 0, 1);
+  const maxVal = Math.ceil((maxLoad * 1.2) / 10) * 10 || 10;
+  const scale = chartHeight / maxVal;
+  const tickStep = maxVal <= 60 ? 10 : Math.ceil(maxVal / 5 / 10) * 10;
+  const ticks = Array.from({ length: Math.floor(maxVal / tickStep) + 1 }, (_, index) => index * tickStep);
+  const operatorNames = [...new Set(summary.stationLoads.flatMap(station =>
+    station.operadores.map(operator => operator.nombre)
+  ))];
+  const colorMap = {};
+  operatorNames.forEach((name, index) => { colorMap[name] = (index % 10) + 1; });
+
+  return `
+    <div class="catalog-yamazumi-chart" style="--catalog-yama-total-height:${totalHeight}px;--catalog-yama-label-height:${labelHeight}px">
+      <div class="catalog-yamazumi-axis">
+        ${ticks.map(tick => `
+          <div class="catalog-yamazumi-tick" style="bottom:${labelHeight + Math.round(tick * scale)}px">
+            <span>${tick}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="catalog-yamazumi-plot">
+        ${ticks.map(tick => `
+          <div class="catalog-yamazumi-gridline" style="bottom:${labelHeight + Math.round(tick * scale)}px"></div>
+        `).join('')}
+        ${takt > 0 ? `
+          <div class="catalog-yamazumi-takt" style="bottom:${labelHeight + Math.round(takt * scale)}px">
+            <span>Takt ${fmt(takt, 2)}s</span>
+          </div>
+        ` : ''}
+        <div class="catalog-yamazumi-bars">
+          ${summary.stationLoads.map(station => {
+            const barHeight = Math.max(Math.round(station.time * scale), station.time > 0 ? 2 : 0);
+            return `
+              <div class="catalog-yamazumi-col">
+                <div class="catalog-yamazumi-value">${fmtCatalogSeconds(station.time)}s</div>
+                <div class="catalog-yamazumi-bar" style="height:${barHeight}px">
+                  ${station.operadores.map(operator => {
+                    const segmentHeight = Math.max(Math.round(operator.time * scale), operator.time > 0 ? 2 : 0);
+                    const colorIdx = colorMap[operator.nombre] || 1;
+                    const showLabel = segmentHeight >= 22;
+                    return `
+                      <div
+                        class="catalog-yamazumi-segment"
+                        style="height:${segmentHeight}px;background:var(--op-${colorIdx})"
+                        title="${esc(operator.nombre)} · ${esc(operator.subconjunto)} · ${fmtCatalogSeconds(operator.time)}s"
+                      >
+                        ${showLabel ? `<span>${esc(operator.nombre)}</span>` : ''}
+                      </div>`;
+                  }).join('')}
+                </div>
+                <div class="catalog-yamazumi-label" title="${esc(station.nombre)}">${esc(station.nombre)}</div>
+              </div>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderYamazumiCatalogLegend(summary) {
+  const operators = [];
+  summary.stationLoads.forEach(station => {
+    station.operadores.forEach(operator => {
+      operators.push({
+        station: station.nombre,
+        nombre: operator.nombre,
+        subconjunto: operator.subconjunto,
+        time: operator.time
+      });
+    });
+  });
+  const operatorNames = [...new Set(operators.map(operator => operator.nombre))];
+  const colorMap = {};
+  operatorNames.forEach((name, index) => { colorMap[name] = (index % 10) + 1; });
+
+  return operators.map(operator => `
+    <div class="catalog-yamazumi-legend-item">
+      <span class="catalog-yamazumi-legend-swatch" style="background:var(--op-${colorMap[operator.nombre] || 1})"></span>
+      <span>${esc(operator.nombre)} · ${esc(operator.subconjunto)} · ${esc(operator.station)}</span>
+      <span class="font-mono">${fmtCatalogSeconds(operator.time)}s</span>
+    </div>
+  `).join('');
+}
+
+function renderYamazumiStationRows(summary) {
+  return summary.stationLoads.map(station => `
+    <tr>
+      <td><strong>${esc(station.nombre)}</strong></td>
+      <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
+      <td>${esc(station.operadoresLabel)}</td>
+      <td>${esc(station.subconjuntosLabel)}</td>
+    </tr>
+  `).join('');
+}
+
 function renderYamazumi(container) {
+  _redistribActive = false;
+  _redistribAssignments = null;
+
+  const summary = getCatalogLineSummary();
+  const takt = getCatalogYamazumiTakt(summary);
+
+  container.innerHTML = `
+    <div class="page-header">
+      <h1 class="page-title">Yamazumi</h1>
+      <p class="page-subtitle">Gráfica conectada al Catálogo guardado por línea</p>
+    </div>
+
+    ${renderCatalogConnectionContextCards(summary)}
+
+    ${!summary.hasOperationalData ? renderCatalogConnectionEmpty() : `
+      <div class="card mb-6">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Gráfica Yamazumi</div>
+            <div class="card-subtitle">Barras por estación segmentadas por operador</div>
+          </div>
+          ${takt > 0 ? `
+            <div class="yama-takt-legend">
+              <div class="yama-takt-legend-line"></div>
+              <span>Línea de Takt (${fmt(takt, 2)} seg)</span>
+            </div>
+          ` : ''}
+        </div>
+        <div class="card-body" style="padding:var(--sp-4) var(--sp-5)">
+          ${renderCatalogYamazumiChart(summary, takt)}
+        </div>
+      </div>
+
+      <div class="two-col-layout">
+        <div class="card">
+          <div class="card-header"><div class="card-title">Operadores relacionados</div></div>
+          <div class="card-body">
+            <div class="catalog-yamazumi-legend">${renderYamazumiCatalogLegend(summary)}</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><div class="card-title">Resumen por estación</div></div>
+          <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
+            <table>
+              <thead>
+                <tr>
+                  <th>Estación</th>
+                  <th>Tiempo total</th>
+                  <th>Operadores</th>
+                  <th>Subconjuntos</th>
+                </tr>
+              </thead>
+              <tbody>${renderYamazumiStationRows(summary)}</tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    `}
+  `;
+}
+
+function renderYamazumiLegacy(container) {
   if (!_redistribActive && !state.stationAssignments.length) {
     state.stationAssignments = autoBalanceOperations();
   }
@@ -4876,12 +5420,12 @@ function renderReport(container) {
     <!-- Report header -->
     <div class="report-header-block">
       <svg width="40" height="40" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="16" cy="16" r="15" stroke="#D946EF" stroke-width="2" fill="none"/>
-        <rect x="8" y="20" width="4" height="6" rx="1" fill="#7E2CA3"/>
-        <rect x="14" y="16" width="4" height="10" rx="1" fill="#A33BC2"/>
-        <rect x="20" y="12" width="4" height="14" rx="1" fill="#F472B6"/>
-        <polyline points="9,18 14,12 20,10 26,8" stroke="#EC4899" stroke-width="1.5" fill="none" stroke-linecap="round"/>
-        <circle cx="26" cy="8" r="2" fill="#F472B6"/>
+        <circle cx="16" cy="16" r="15" stroke="#4A9BE8" stroke-width="2" fill="none"/>
+        <rect x="8" y="20" width="4" height="6" rx="1" fill="#FFFFFF"/>
+        <rect x="14" y="16" width="4" height="10" rx="1" fill="#1D73C9"/>
+        <rect x="20" y="12" width="4" height="14" rx="1" fill="#4A9BE8"/>
+        <polyline points="9,18 14,12 20,10 26,8" stroke="#FFFFFF" stroke-width="1.5" fill="none" stroke-linecap="round"/>
+        <circle cx="26" cy="8" r="2" fill="#4A9BE8"/>
       </svg>
       <div class="report-logo-text">
         <h2>KaiFlow — Balanceo de Línea</h2>
@@ -5345,6 +5889,135 @@ function buildBalanceRows(assignments, stationLoads, takt) {
 }
 
 // ── Standard Times helpers ────────────────────
+function cloneStandardTimesBaseData() {
+  return standardTimesBaseData.map(item => ({ ...item }));
+}
+
+function normalizeStandardTimeRow(row, index) {
+  const parsedTime = parseFloat(row?.tiempoSeg);
+  return {
+    id: row?.id || generateId('STD'),
+    area: String(row?.area ?? '').trim(),
+    tipo: String(row?.tipo ?? '').trim(),
+    actividad: String(row?.actividad ?? '').trim(),
+    tiempoSeg: Number.isFinite(parsedTime) ? Math.max(0, Math.round(parsedTime * 10) / 10) : 0,
+    order: index + 1
+  };
+}
+
+function readStandardTimesData() {
+  try {
+    const raw = localStorage.getItem(STANDARD_TIMES_STORAGE_KEY);
+    if (!raw) return cloneStandardTimesBaseData();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return cloneStandardTimesBaseData();
+    return parsed.map(normalizeStandardTimeRow);
+  } catch {
+    return cloneStandardTimesBaseData();
+  }
+}
+
+function saveStandardTimesData(rows) {
+  localStorage.setItem(STANDARD_TIMES_STORAGE_KEY, JSON.stringify(rows.map(normalizeStandardTimeRow)));
+}
+
+function renderStandardTimeRow(row = {}) {
+  const normalized = normalizeStandardTimeRow(row, 0);
+  return `
+    <tr data-std-row="${esc(normalized.id)}">
+      <td>
+        <input class="form-input standard-time-input" data-std-field="area" type="text" value="${esc(normalized.area)}" />
+      </td>
+      <td>
+        <input class="form-input standard-time-input" data-std-field="tipo" type="text" value="${esc(normalized.tipo)}" />
+      </td>
+      <td>
+        <input class="form-input standard-time-input" data-std-field="actividad" type="text" value="${esc(normalized.actividad)}" />
+      </td>
+      <td>
+        <input class="form-input standard-time-input standard-time-number" data-std-field="tiempoSeg" type="number" min="0" step="0.1" value="${normalized.tiempoSeg || ''}" />
+      </td>
+      <td class="td-actions">
+        <button class="btn btn--ghost btn--sm" data-std-action="delete" type="button">Eliminar</button>
+      </td>
+    </tr>
+  `;
+}
+
+function collectStandardTimesRows(container) {
+  return [...container.querySelectorAll('[data-std-row]')].map((tr, index) => {
+    const timeInput = tr.querySelector('[data-std-field="tiempoSeg"]');
+    const parsedTime = parseFloat(timeInput?.value);
+    if (timeInput && timeInput.value.trim() && !Number.isFinite(parsedTime)) {
+      timeInput.classList.add('input-invalid');
+    } else if (timeInput) {
+      timeInput.classList.remove('input-invalid');
+    }
+
+    return normalizeStandardTimeRow({
+      id: tr.dataset.stdRow,
+      area: tr.querySelector('[data-std-field="area"]')?.value,
+      tipo: tr.querySelector('[data-std-field="tipo"]')?.value,
+      actividad: tr.querySelector('[data-std-field="actividad"]')?.value,
+      tiempoSeg: Number.isFinite(parsedTime) ? parsedTime : 0
+    }, index);
+  });
+}
+
+function bindStandardTimesEvents(container) {
+  const body = container.querySelector('#std-table-body');
+
+  container.querySelector('#std-add-row')?.addEventListener('click', () => {
+    if (!body) return;
+    body.insertAdjacentHTML('beforeend', renderStandardTimeRow({
+      id: generateId('STD'),
+      area: '',
+      tipo: '',
+      actividad: '',
+      tiempoSeg: 0
+    }));
+    const lastRow = body.querySelector('tr:last-child');
+    lastRow?.querySelector('input')?.focus();
+  });
+
+  container.querySelector('#std-save-table')?.addEventListener('click', () => {
+    const rows = collectStandardTimesRows(container);
+    saveStandardTimesData(rows);
+    showToast('Tiempos estándar guardados correctamente.', 'success');
+  });
+
+  container.querySelector('#std-restore-base')?.addEventListener('click', () => {
+    showConfirm(
+      'Restaurar datos base',
+      '¿Seguro que deseas restaurar los tiempos estándar base? Se perderán los cambios no guardados.',
+      () => {
+        const baseRows = cloneStandardTimesBaseData();
+        saveStandardTimesData(baseRows);
+        if (body) body.innerHTML = baseRows.map(renderStandardTimeRow).join('');
+        showToast('Tiempos estándar restaurados correctamente.', 'success');
+      }
+    );
+  });
+
+  body?.addEventListener('click', event => {
+    const button = event.target.closest('[data-std-action="delete"]');
+    if (!button) return;
+    const row = button.closest('[data-std-row]');
+    showConfirm(
+      'Eliminar tiempo estándar',
+      '¿Seguro que deseas eliminar este tiempo estándar?',
+      () => row?.remove()
+    );
+  });
+
+  body?.addEventListener('input', event => {
+    const input = event.target.closest('[data-std-field="tiempoSeg"]');
+    if (!input) return;
+    const parsed = parseFloat(input.value);
+    input.classList.toggle('input-invalid', !!input.value.trim() && !Number.isFinite(parsed));
+  });
+}
+
 function openEditTimeModal(opId) {
   const op = state.operations.find(o => o.id === opId);
   const st = state.standardTimes.find(s => s.operationId === opId);
