@@ -22,6 +22,9 @@ let _activeUser = null;
 // Stopwatch runtime state (not persisted)
 let _sw = { active: false, startMs: 0, elapsedMs: 0, lastLapMs: 0, mode: 'reset', studyId: null, stepId: null, rafId: null };
 
+// Records tab filter state (not persisted)
+let _tsFilter = { search: '', status: 'all', sort: 'newest' };
+
 const DASHBOARD_LINES_BY_AREA = {
   Interior: [
     'SUB ENSAMBLE 1',
@@ -2030,47 +2033,105 @@ function tsProgressOf(study) {
 function renderTSRecordsSection(container) {
   const studies = state.timeStudies || [];
 
+  // Summary stats
+  const totalCaptures = studies.reduce((sum, s) =>
+    sum + (s.steps || []).reduce((ss, step) => ss + (step.captures || []).length, 0), 0);
+  const countByStatus = { draft: 0, in_progress: 0, completed: 0 };
+  studies.forEach(s => { if (countByStatus[s.status] !== undefined) countByStatus[s.status]++; });
+
+  const summaryHTML = `
+    <div class="kpi-grid" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr));margin-bottom:var(--sp-4)">
+      <div class="kpi-card">
+        <div class="kpi-label">Total estudios</div>
+        <div class="kpi-value">${studies.length}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Borrador</div>
+        <div class="kpi-value" style="color:var(--text-muted)">${countByStatus.draft}</div>
+      </div>
+      <div class="kpi-card kpi-card--warning">
+        <div class="kpi-label">En progreso</div>
+        <div class="kpi-value kpi-value--warning">${countByStatus.in_progress}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Completados</div>
+        <div class="kpi-value kpi-value--green">${countByStatus.completed}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Capturas registradas</div>
+        <div class="kpi-value">${totalCaptures}</div>
+      </div>
+    </div>
+  `;
+
   if (studies.length === 0) {
     container.innerHTML = `
-      <div class="ts-empty-state">
-        <div class="ts-empty-state-title">Aún no hay estudios de tiempo guardados.</div>
-        <div class="ts-empty-state-body">Crea tu primer estudio desde la pestaña <strong>Toma de tiempos</strong>.</div>
+      ${summaryHTML}
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">Estudios guardados</div>
+          <div class="btn-group">
+            <label class="btn btn--secondary btn--sm" style="cursor:pointer" title="Importar estudios desde JSON">
+              Importar JSON
+              <input type="file" accept=".json,application/json" style="display:none" id="ts-import-input" />
+            </label>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="ts-empty-state">
+            <div class="ts-empty-state-title">Aún no hay estudios de tiempo guardados.</div>
+            <div class="ts-empty-state-body">Crea tu primer estudio desde la pestaña <strong>Toma de tiempos</strong>.</div>
+          </div>
+        </div>
       </div>
     `;
+    _bindTSImportInput(container, container);
     return;
   }
 
-  const rows = studies.map(s => {
-    const { done, total } = tsProgressOf(s);
-    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-    const date = s.updatedAt || s.createdAt;
-    return `
-      <tr>
-        <td><strong>${esc(s.name)}</strong></td>
-        <td style="color:var(--text-muted);font-size:var(--font-13)">${date ? new Date(date).toLocaleDateString('es-MX') : '—'}</td>
-        <td class="text-right">${(s.steps || []).length}</td>
-        <td>${tsBadgeForStatus(s.status)}</td>
-        <td style="min-width:90px">
-          <div style="font-size:var(--font-12);color:var(--text-muted);margin-bottom:3px">${done}/${total} · ${pct}%</div>
-          <div class="ts-progress-bar"><div class="ts-progress-bar-fill" style="width:${pct}%"></div></div>
-        </td>
-        <td>
-          <div class="ts-row-actions">
-            <button class="btn btn--ghost btn--sm" data-ts-action="view"      data-study-id="${esc(s.id)}" title="Ver detalle">Ver</button>
-            <button class="btn btn--ghost btn--sm" data-ts-action="edit"      data-study-id="${esc(s.id)}" title="Editar">Editar</button>
-            <button class="btn btn--ghost btn--sm" data-ts-action="duplicate" data-study-id="${esc(s.id)}" title="Duplicar">Duplicar</button>
-            <button class="btn btn--ghost btn--sm ts-btn-danger" data-ts-action="delete" data-study-id="${esc(s.id)}" title="Eliminar">Eliminar</button>
-          </div>
-        </td>
-      </tr>
-    `;
-  }).join('');
-
   container.innerHTML = `
+    ${summaryHTML}
     <div class="card">
       <div class="card-header">
-        <div class="card-title">Estudios guardados</div>
-        <span class="badge badge--neutral">${studies.length}</span>
+        <div style="display:flex;align-items:center;gap:var(--sp-3)">
+          <div class="card-title">Estudios guardados</div>
+          <span class="badge badge--neutral">${studies.length}</span>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn--secondary btn--sm" id="ts-export-all" title="Exportar todos los estudios como JSON">Exportar todos</button>
+          <label class="btn btn--secondary btn--sm" style="cursor:pointer" title="Importar estudios desde JSON">
+            Importar JSON
+            <input type="file" accept=".json,application/json" style="display:none" id="ts-import-input" />
+          </label>
+        </div>
+      </div>
+      <div class="card-body" style="border-bottom:1px solid var(--border);padding-bottom:var(--sp-4)">
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr;gap:var(--sp-3);align-items:end">
+          <div class="form-group" style="margin:0">
+            <label class="form-label" for="ts-search">Buscar</label>
+            <input class="form-input w-full" id="ts-search" type="search" placeholder="Nombre del estudio o paso..." value="${esc(_tsFilter.search)}" />
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label" for="ts-status-filter">Estado</label>
+            <select class="form-select" id="ts-status-filter">
+              <option value="all"${_tsFilter.status === 'all' ? ' selected' : ''}>Todos</option>
+              <option value="draft"${_tsFilter.status === 'draft' ? ' selected' : ''}>Borrador</option>
+              <option value="in_progress"${_tsFilter.status === 'in_progress' ? ' selected' : ''}>En progreso</option>
+              <option value="completed"${_tsFilter.status === 'completed' ? ' selected' : ''}>Completado</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin:0">
+            <label class="form-label" for="ts-sort">Ordenar</label>
+            <select class="form-select" id="ts-sort">
+              <option value="newest"${_tsFilter.sort === 'newest' ? ' selected' : ''}>Más recientes</option>
+              <option value="oldest"${_tsFilter.sort === 'oldest' ? ' selected' : ''}>Más antiguos</option>
+              <option value="name-az"${_tsFilter.sort === 'name-az' ? ' selected' : ''}>Nombre A-Z</option>
+              <option value="name-za"${_tsFilter.sort === 'name-za' ? ' selected' : ''}>Nombre Z-A</option>
+              <option value="progress-desc"${_tsFilter.sort === 'progress-desc' ? ' selected' : ''}>Mayor progreso</option>
+              <option value="progress-asc"${_tsFilter.sort === 'progress-asc' ? ' selected' : ''}>Menor progreso</option>
+            </select>
+          </div>
+        </div>
       </div>
       <div style="overflow-x:auto">
         <table class="time-study-table">
@@ -2081,25 +2142,111 @@ function renderTSRecordsSection(container) {
               <th class="text-right" style="width:66px">Pasos</th>
               <th style="width:120px">Estado</th>
               <th style="width:110px">Progreso</th>
-              <th style="width:240px">Acciones</th>
+              <th style="min-width:310px">Acciones</th>
             </tr>
           </thead>
-          <tbody>${rows}</tbody>
+          <tbody id="ts-records-tbody"></tbody>
         </table>
       </div>
     </div>
   `;
 
-  container.querySelectorAll('[data-ts-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const id     = btn.dataset.studyId;
-      const action = btn.dataset.tsAction;
-      if (action === 'view')      openTimeStudyDetailModal(id);
-      else if (action === 'edit') openEditTimeStudyModal(id, () => renderTSRecordsSection(container));
-      else if (action === 'duplicate') { tsDuplicateStudy(id); renderTSRecordsSection(container); }
-      else if (action === 'delete')    tsDeleteStudy(id, container);
+  const refreshTable = () => {
+    const search = _tsFilter.search.toLowerCase().trim();
+    const statusFilter = _tsFilter.status;
+    const sort = _tsFilter.sort;
+
+    let filtered = studies.filter(s => {
+      if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+      if (search) {
+        const nameMatch = s.name.toLowerCase().includes(search);
+        const stepMatch = (s.steps || []).some(step => step.name.toLowerCase().includes(search));
+        if (!nameMatch && !stepMatch) return false;
+      }
+      return true;
     });
+
+    filtered.sort((a, b) => {
+      if (sort === 'newest')        return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
+      if (sort === 'oldest')        return new Date(a.updatedAt || a.createdAt) - new Date(b.updatedAt || b.createdAt);
+      if (sort === 'name-az')       return a.name.localeCompare(b.name, 'es');
+      if (sort === 'name-za')       return b.name.localeCompare(a.name, 'es');
+      if (sort === 'progress-desc') {
+        const pa = tsProgressOf(a); const pb = tsProgressOf(b);
+        return (pb.total > 0 ? pb.done / pb.total : 0) - (pa.total > 0 ? pa.done / pa.total : 0);
+      }
+      if (sort === 'progress-asc') {
+        const pa = tsProgressOf(a); const pb = tsProgressOf(b);
+        return (pa.total > 0 ? pa.done / pa.total : 0) - (pb.total > 0 ? pb.done / pb.total : 0);
+      }
+      return 0;
+    });
+
+    const tbody = container.querySelector('#ts-records-tbody');
+    if (!tbody) return;
+
+    if (filtered.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:var(--sp-8);color:var(--text-muted)">No hay estudios que coincidan con la búsqueda o filtros actuales.</td></tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map(s => {
+      const { done, total } = tsProgressOf(s);
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      const date = s.updatedAt || s.createdAt;
+      return `
+        <tr>
+          <td><strong>${esc(s.name)}</strong></td>
+          <td style="color:var(--text-muted);font-size:var(--font-13)">${date ? new Date(date).toLocaleDateString('es-MX') : '—'}</td>
+          <td class="text-right">${(s.steps || []).length}</td>
+          <td>${tsBadgeForStatus(s.status)}</td>
+          <td style="min-width:90px">
+            <div style="font-size:var(--font-12);color:var(--text-muted);margin-bottom:3px">${done}/${total} · ${pct}%</div>
+            <div class="ts-progress-bar"><div class="ts-progress-bar-fill" style="width:${pct}%"></div></div>
+          </td>
+          <td>
+            <div class="ts-row-actions">
+              <button class="btn btn--ghost btn--sm" data-ts-action="view"      data-study-id="${esc(s.id)}" title="Ver detalle">Ver</button>
+              <button class="btn btn--ghost btn--sm" data-ts-action="edit"      data-study-id="${esc(s.id)}" title="Editar">Editar</button>
+              <button class="btn btn--ghost btn--sm" data-ts-action="duplicate" data-study-id="${esc(s.id)}" title="Duplicar">Duplicar</button>
+              <button class="btn btn--ghost btn--sm" data-ts-action="export"    data-study-id="${esc(s.id)}" title="Exportar JSON">Exportar</button>
+              <button class="btn btn--ghost btn--sm ts-btn-danger" data-ts-action="delete" data-study-id="${esc(s.id)}" title="Eliminar">Eliminar</button>
+            </div>
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    tbody.querySelectorAll('[data-ts-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.studyId;
+        const action = btn.dataset.tsAction;
+        if      (action === 'view')      openTimeStudyDetailModal(id);
+        else if (action === 'edit')      openEditTimeStudyModal(id, () => renderTSRecordsSection(container));
+        else if (action === 'duplicate') { tsDuplicateStudy(id); renderTSRecordsSection(container); }
+        else if (action === 'export')    tsExportStudy(id);
+        else if (action === 'delete')    tsDeleteStudy(id, container);
+      });
+    });
+  };
+
+  refreshTable();
+
+  container.querySelector('#ts-search')?.addEventListener('input', e => {
+    _tsFilter.search = e.target.value;
+    refreshTable();
   });
+  container.querySelector('#ts-status-filter')?.addEventListener('change', e => {
+    _tsFilter.status = e.target.value;
+    refreshTable();
+  });
+  container.querySelector('#ts-sort')?.addEventListener('change', e => {
+    _tsFilter.sort = e.target.value;
+    refreshTable();
+  });
+
+  container.querySelector('#ts-export-all')?.addEventListener('click', tsExportAllStudies);
+  _bindTSImportInput(container, container);
 }
 
 function openNewTimeStudyModal() {
@@ -2749,6 +2896,119 @@ function tsReopenStudy(studyId) {
   study.updatedAt = new Date().toISOString();
   saveState();
   return true;
+}
+
+// ── Time Study: Phase 5 — export / import ─────
+function sanitizeFilename(name) {
+  return String(name || '').toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9\-_]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'estudio';
+}
+
+function tsExportStudy(studyId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return;
+  const blob = new Blob([JSON.stringify(study, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `estudio-tiempo-${sanitizeFilename(study.name)}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`Estudio "${study.name}" exportado`, 'success');
+}
+
+function tsExportAllStudies() {
+  const studies = state.timeStudies || [];
+  if (studies.length === 0) { showToast('No hay estudios para exportar', 'warning'); return; }
+  const blob = new Blob([JSON.stringify(studies, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'kaiflow-estudios-tiempo-backup.json';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast(`${studies.length} estudio(s) exportados`, 'success');
+}
+
+function tsImportStudiesFromJSON(jsonText, sectionContainer) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    showToast('Archivo JSON inválido o dañado', 'danger');
+    return;
+  }
+
+  const list = Array.isArray(parsed)
+    ? parsed
+    : (parsed && typeof parsed === 'object' && parsed.id ? [parsed] : null);
+
+  if (!list || list.length === 0) {
+    showToast('El archivo no contiene estudios de tiempo reconocibles', 'danger');
+    return;
+  }
+
+  const valid = list.filter(s => s && typeof s === 'object' && s.name && Array.isArray(s.steps));
+  if (valid.length === 0) {
+    showToast('Ningún estudio en el archivo tiene formato válido', 'danger');
+    return;
+  }
+
+  showConfirm(
+    'Importar estudios',
+    `Se importarán ${valid.length} estudio(s) desde este archivo. No se eliminarán tus estudios actuales. ¿Deseas continuar?`,
+    () => {
+      const existingIds = new Set((state.timeStudies || []).map(s => s.id));
+      const now = new Date().toISOString();
+      const imported = valid.map(s => {
+        const needsNewId = !s.id || existingIds.has(s.id);
+        return {
+          id: needsNewId ? generateId('TST') : s.id,
+          name: s.name || 'Sin nombre',
+          status: ['draft', 'in_progress', 'completed'].includes(s.status) ? s.status : 'draft',
+          createdAt: s.createdAt || now,
+          updatedAt: s.updatedAt || now,
+          completedAt: s.completedAt || null,
+          steps: (s.steps || []).map(step => ({
+            id: step.id || generateId('STP'),
+            name: step.name || '',
+            requiredCaptures: Math.max(1, Number(step.requiredCaptures) || 1),
+            captures: Array.isArray(step.captures) ? step.captures : [],
+            averageTime: step.averageTime != null ? Number(step.averageTime) : null,
+            isComplete: Boolean(step.isComplete)
+          }))
+        };
+      });
+      if (!Array.isArray(state.timeStudies)) state.timeStudies = [];
+      state.timeStudies.push(...imported);
+      saveState();
+      showToast(`${imported.length} estudio(s) importados correctamente`, 'success');
+      renderTSRecordsSection(sectionContainer);
+    }
+  );
+}
+
+function _bindTSImportInput(container, sectionContainer) {
+  const input = container.querySelector('#ts-import-input');
+  if (!input) return;
+  input.addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = evt => {
+      tsImportStudiesFromJSON(evt.target.result, sectionContainer);
+      input.value = '';
+    };
+    reader.readAsText(file);
+  });
 }
 
 // ── Stopwatch: core ───────────────────────────
