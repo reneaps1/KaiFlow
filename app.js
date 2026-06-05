@@ -2607,6 +2607,57 @@ function openNewTimeStudyModal() {
   });
 }
 
+function buildCapturesMatrixHTML(steps) {
+  const maxCaptures = steps.reduce(function(m, s) {
+    return Math.max(m, (s.captures || []).length);
+  }, 0);
+  if (steps.length === 0 || maxCaptures === 0) return '';
+
+  var headerCells = '';
+  for (var h = 0; h < maxCaptures; h++) {
+    headerCells += '<th class="text-right" style="width:76px;font-size:var(--font-12)">Toma ' + (h + 1) + '</th>';
+  }
+
+  var bodyRows = '';
+  for (var r = 0; r < steps.length; r++) {
+    var step = steps[r];
+    var caps = step.captures || [];
+    var avg = step.averageTime != null ? fmtMs(step.averageTime) : '—';
+    var cells = '';
+    for (var c = 0; c < maxCaptures; c++) {
+      var cap = caps[c];
+      cells += '<td class="text-right font-mono" style="font-size:var(--font-12);color:' +
+        (cap ? 'inherit' : 'var(--text-muted)') + '">' +
+        (cap ? fmtMs(cap.valueMs) : '—') + '</td>';
+    }
+    bodyRows += '<tr>' +
+      '<td style="font-weight:500;font-size:var(--font-12)">' + esc(step.name) + '</td>' +
+      cells +
+      '<td class="text-right font-mono" style="font-weight:700;font-size:var(--font-12);background:var(--surface-2,#f8f9fa)">' + avg + '</td>' +
+      '</tr>';
+  }
+
+  var label = steps.length + ' actividad' + (steps.length === 1 ? '' : 'es') +
+    ' · ' + maxCaptures + ' toma' + (maxCaptures === 1 ? '' : 's');
+
+  return '<div style="margin-bottom:var(--sp-5);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">' +
+    '<div style="background:var(--surface-2,#f8f9fa);padding:var(--sp-3) var(--sp-4);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border)">' +
+      '<span style="font-weight:600;font-size:var(--font-13)">Detalle de tomas por actividad</span>' +
+      '<span style="font-size:var(--font-12);color:var(--text-muted)">' + label + '</span>' +
+    '</div>' +
+    '<div style="overflow-x:auto">' +
+      '<table class="time-study-table">' +
+        '<thead><tr>' +
+          '<th style="min-width:130px">Actividad</th>' +
+          headerCells +
+          '<th class="text-right" style="width:88px;background:var(--surface-2,#f8f9fa)">Promedio</th>' +
+        '</tr></thead>' +
+        '<tbody>' + bodyRows + '</tbody>' +
+      '</table>' +
+    '</div>' +
+  '</div>';
+}
+
 function openTimeStudyDetailModal(studyId) {
   const study = (state.timeStudies || []).find(s => s.id === studyId);
   if (!study) return;
@@ -2663,41 +2714,7 @@ function openTimeStudyDetailModal(studyId) {
     `;
   }).join('');
 
-  const maxCaptures = steps.reduce((m, s) => Math.max(m, (s.captures || []).length), 0);
-  const capturesMatrixHTML = steps.length > 0 && maxCaptures > 0 ? `
-    <details style="margin-bottom:var(--sp-5)">
-      <summary style="cursor:pointer;font-weight:600;font-size:var(--font-13);padding:var(--sp-3) var(--sp-4);background:var(--surface-2,#f8f9fa);border:1px solid var(--border);border-radius:var(--radius);list-style:none;display:flex;align-items:center;justify-content:space-between;user-select:none">
-        <span>Detalle de tomas por actividad</span>
-        <span style="font-size:var(--font-12);color:var(--text-muted);font-weight:400">${steps.length} actividad${steps.length === 1 ? '' : 'es'} &middot; ${maxCaptures} toma${maxCaptures === 1 ? '' : 's'} máx.</span>
-      </summary>
-      <div style="border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);overflow-x:auto">
-        <table class="time-study-table" style="font-size:var(--font-12)">
-          <thead>
-            <tr>
-              <th style="min-width:130px">Actividad</th>
-              ${Array.from({length: maxCaptures}, (_, i) => `<th class="text-right" style="width:76px">Toma ${i + 1}</th>`).join('')}
-              <th class="text-right" style="width:88px;background:var(--surface-2,#f8f9fa)">Promedio</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${steps.map(step => {
-              const caps = step.captures || [];
-              const avg = step.averageTime != null ? fmtMs(step.averageTime) : '—';
-              const cells = Array.from({length: maxCaptures}, (_, i) => {
-                const c = caps[i];
-                return `<td class="text-right font-mono" style="color:${c ? 'inherit' : 'var(--text-muted)'}">${c ? fmtMs(c.valueMs) : '—'}</td>`;
-              }).join('');
-              return `<tr>
-                <td style="font-weight:500">${esc(step.name)}</td>
-                ${cells}
-                <td class="text-right font-mono" style="font-weight:700;background:var(--surface-2,#f8f9fa)">${avg}</td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  ` : '';
+  const capturesMatrixHTML = buildCapturesMatrixHTML(steps);
 
   const completedStepsForPrep = steps.filter(s => s.isComplete);
   const completedStepsRows = completedStepsForPrep.length > 0
