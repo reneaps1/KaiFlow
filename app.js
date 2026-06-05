@@ -25,6 +25,9 @@ let _sw = { active: false, startMs: 0, elapsedMs: 0, lastLapMs: 0, mode: 'reset'
 // Records tab filter state (not persisted)
 let _tsFilter = { search: '', status: 'all', sort: 'newest' };
 
+// Balance study times filter state (not persisted)
+let _balanceStudyFilter = 'todos';
+
 const DASHBOARD_LINES_BY_AREA = {
   Interior: [
     'SUB ENSAMBLE 1',
@@ -284,11 +287,12 @@ function fmtMs(ms) {
 }
 
 function normalizeManufacturingCatalog() {
+  const catalogHasContent = MANUFACTURING_ACTIVITY_CATALOG.length > 0;
   const mustReplaceCatalog =
     state.catalogVersion !== CATALOG_VERSION ||
     !Array.isArray(state.operations) ||
-    state.operations.length !== MANUFACTURING_ACTIVITY_CATALOG.length ||
-    state.operations.some(op => !String(op.id || '').startsWith('ACT-'));
+    (catalogHasContent && state.operations.length !== MANUFACTURING_ACTIVITY_CATALOG.length) ||
+    (catalogHasContent && state.operations.some(op => !String(op.id || '').startsWith('ACT-')));
 
   if (!mustReplaceCatalog) {
     state.activityCatalog = deepClone(MANUFACTURING_ACTIVITY_CATALOG);
@@ -302,7 +306,11 @@ function normalizeManufacturingCatalog() {
     line: state.line || DEFAULT_STATE.line,
     process: state.process || DEFAULT_STATE.process,
     balanceSettings: state.balanceSettings || DEFAULT_STATE.balanceSettings,
-    roles: state.roles || DEFAULT_STATE.roles
+    roles: state.roles || DEFAULT_STATE.roles,
+    timeStudies: Array.isArray(state.timeStudies) ? state.timeStudies : [],
+    operations: Array.isArray(state.operations) ? state.operations : [],
+    standardTimes: Array.isArray(state.standardTimes) ? state.standardTimes : [],
+    stationAssignments: Array.isArray(state.stationAssignments) ? state.stationAssignments : []
   };
 
   state = {
@@ -310,12 +318,9 @@ function normalizeManufacturingCatalog() {
     ...deepClone(preserved),
     catalogVersion: CATALOG_VERSION,
     activityCatalog: deepClone(MANUFACTURING_ACTIVITY_CATALOG),
-    operations: buildDefaultOperations(),
-    standardTimes: buildDefaultStandardTimes(),
     scenarios: deepClone(DEFAULT_STATE.scenarios),
     timeStudyStructure: buildTimeStudyStructure(),
-    timeStudySelection: deepClone(DEFAULT_STATE.timeStudySelection),
-    stationAssignments: []
+    timeStudySelection: deepClone(DEFAULT_STATE.timeStudySelection)
   };
 
   return true;
@@ -4191,6 +4196,103 @@ function renderBalanceStationRows(summary) {
   `).join('');
 }
 
+function renderStudyTimesSection() {
+  const studyOps = (state.operations || []).filter(op => op.source === 'time_study');
+
+  if (!studyOps.length) {
+    return `
+      <div class="card mb-6">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Tiempos disponibles de estudios</div>
+            <div class="card-subtitle">Operaciones generadas desde Estudios de Tiempo</div>
+          </div>
+        </div>
+        <div class="card-body" style="text-align:center;color:var(--text-muted);padding:var(--sp-8) var(--sp-5)">
+          Sin tiempos disponibles. Completa un estudio y envíalo a Tiempos Estándar para verlos aquí.
+        </div>
+      </div>`;
+  }
+
+  const filter = _balanceStudyFilter;
+  const availableCount = studyOps.filter(op => !op.usedInBalance).length;
+  const usedCount = studyOps.filter(op => op.usedInBalance).length;
+  const filtered = filter === 'disponibles'
+    ? studyOps.filter(op => !op.usedInBalance)
+    : filter === 'usados'
+      ? studyOps.filter(op => op.usedInBalance)
+      : studyOps;
+
+  const rows = filtered.length > 0
+    ? filtered.map(op => {
+        const isValid = op.standardTime > 0 && op.name;
+        const statusBadge = op.usedInBalance
+          ? `<span class="badge badge--success">Usado en Balanceo</span>`
+          : `<span class="badge badge--neutral">Disponible</span>`;
+        const usedDate = op.importedToBalanceAt
+          ? new Date(op.importedToBalanceAt).toLocaleDateString('es-MX')
+          : '';
+        const actionCell = op.usedInBalance
+          ? `<span style="font-size:var(--font-12);color:var(--text-muted)">${usedDate}</span>`
+          : `<button class="btn btn--primary btn--sm btn-use-in-balance"
+               data-op-id="${esc(op.id)}" ${!isValid ? 'disabled title="Tiempo o nombre inválido"' : ''}>
+               Usar en balanceo
+             </button>`;
+        const sentAt = op.createdAt ? new Date(op.createdAt).toLocaleDateString('es-MX') : '—';
+        return `
+          <tr>
+            <td>
+              ${esc(op.name)}
+              <span class="badge badge--info" style="margin-left:4px">Estudio</span>
+            </td>
+            <td class="text-right font-mono">${op.standardTime} s</td>
+            <td>${esc(op.sourceStudyName || '—')}</td>
+            <td class="text-right font-mono">${op.capturesCount != null ? op.capturesCount : '—'}</td>
+            <td>${sentAt}</td>
+            <td>${statusBadge}</td>
+            <td>${actionCell}</td>
+          </tr>`;
+      }).join('')
+    : `<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:var(--sp-5)">Sin resultados para este filtro</td></tr>`;
+
+  return `
+    <div class="card mb-6">
+      <div class="card-header" style="flex-wrap:wrap;gap:var(--sp-3)">
+        <div>
+          <div class="card-title">Tiempos disponibles de estudios</div>
+          <div class="card-subtitle">Operaciones generadas desde Estudios de Tiempo · ${studyOps.length} total</div>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+          <button class="btn ${filter === 'todos' ? 'btn--primary' : 'btn--ghost'} btn--sm bal-study-filter-btn" data-filter="todos">
+            Todos (${studyOps.length})
+          </button>
+          <button class="btn ${filter === 'disponibles' ? 'btn--primary' : 'btn--ghost'} btn--sm bal-study-filter-btn" data-filter="disponibles">
+            Disponibles (${availableCount})
+          </button>
+          <button class="btn ${filter === 'usados' ? 'btn--primary' : 'btn--ghost'} btn--sm bal-study-filter-btn" data-filter="usados">
+            Ya usados (${usedCount})
+          </button>
+        </div>
+      </div>
+      <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
+        <table>
+          <thead>
+            <tr>
+              <th>Actividad</th>
+              <th class="text-right">Tiempo promedio</th>
+              <th>Estudio origen</th>
+              <th class="text-right">Capturas</th>
+              <th>Enviado</th>
+              <th>Estado</th>
+              <th>Acción</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
 function renderBalance(container) {
   const summary = getCatalogLineSummary();
 
@@ -4199,6 +4301,8 @@ function renderBalance(container) {
       <h1 class="page-title">Balanceo de Línea</h1>
       <p class="page-subtitle">Distribución conectada al Catálogo guardado por línea</p>
     </div>
+
+    ${renderStudyTimesSection()}
 
     ${renderCatalogConnectionContextCards(summary)}
 
@@ -4250,6 +4354,87 @@ function renderBalance(container) {
       </div>
     `}
   `;
+
+  container.querySelectorAll('.bal-study-filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _balanceStudyFilter = btn.dataset.filter;
+      renderBalance(container);
+    });
+  });
+
+  container.querySelectorAll('.btn-use-in-balance').forEach(btn => {
+    btn.addEventListener('click', () => openUseInBalanceModal(btn.dataset.opId));
+  });
+}
+
+function openUseInBalanceModal(opId) {
+  const op = (state.operations || []).find(o => o.id === opId);
+  if (!op) return;
+
+  if (!op.name) { showToast('Esta operación no tiene nombre válido', 'warning'); return; }
+  if (!op.standardTime || op.standardTime <= 0) {
+    showToast('Esta operación no tiene tiempo promedio válido', 'warning');
+    return;
+  }
+  if (op.source !== 'time_study') { showToast('Solo se pueden usar operaciones provenientes de estudios de tiempo', 'warning'); return; }
+
+  const sentAt = op.createdAt ? new Date(op.createdAt).toLocaleString('es-MX') : '—';
+  const activeLabel = op.active
+    ? `<span class="badge badge--success">Activo en operaciones</span>`
+    : `<span class="badge badge--neutral">Inactivo</span>`;
+
+  openModal('Usar tiempo de estudio en Balanceo', `
+    <p style="color:var(--text-secondary);font-size:var(--font-14);margin-bottom:var(--sp-4)">
+      Confirma que deseas registrar este tiempo como usado en el módulo de Balanceo.
+      Las estaciones no se redistribuirán automáticamente.
+    </p>
+    <div style="background:var(--surface-bg);border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--sp-4);margin-bottom:var(--sp-4)">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3)">
+        <div>
+          <div style="font-size:var(--font-12);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Actividad</div>
+          <div style="font-weight:600">${esc(op.name)}</div>
+        </div>
+        <div>
+          <div style="font-size:var(--font-12);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Tiempo promedio</div>
+          <div class="font-mono" style="font-weight:600">${op.standardTime} s</div>
+        </div>
+        <div>
+          <div style="font-size:var(--font-12);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Estudio origen</div>
+          <div>${esc(op.sourceStudyName || '—')}</div>
+        </div>
+        <div>
+          <div style="font-size:var(--font-12);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Capturas</div>
+          <div class="font-mono">${op.capturesCount != null ? op.capturesCount : '—'}</div>
+        </div>
+        <div>
+          <div style="font-size:var(--font-12);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Fecha de envío a T.E.</div>
+          <div>${sentAt}</div>
+        </div>
+        <div>
+          <div style="font-size:var(--font-12);color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px">Estado</div>
+          <div>${activeLabel}</div>
+        </div>
+      </div>
+    </div>
+    <div style="background:var(--info-bg);border:1px solid var(--info);border-radius:var(--radius-md);padding:var(--sp-3);font-size:var(--font-13);color:var(--info-text);margin-bottom:var(--sp-4)">
+      La operación ya está incluida en el catálogo de operaciones activas. Al confirmar se registrará
+      la trazabilidad al estudio de origen y quedará marcada como usada en Balanceo.
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn--ghost" id="use-bal-cancel">Cancelar</button>
+      <button class="btn btn--primary" id="use-bal-confirm">Confirmar uso en balanceo</button>
+    </div>
+  `);
+
+  document.getElementById('use-bal-cancel').addEventListener('click', closeModal);
+  document.getElementById('use-bal-confirm').addEventListener('click', () => {
+    op.usedInBalance = true;
+    op.importedToBalanceAt = new Date().toISOString();
+    saveState();
+    closeModal();
+    showToast(`"${op.name}" registrado como usado en balanceo`, 'success');
+    renderBalance(document.getElementById('main-content'));
+  });
 }
 
 function renderBalanceLegacy(container) {
