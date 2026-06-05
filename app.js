@@ -349,6 +349,9 @@ function normalizeTimeStudies() {
       createdAt: s.createdAt || now,
       updatedAt: s.updatedAt || s.createdAt || now,
       completedAt: s.completedAt || null,
+      sentToStandardTimes: s.sentToStandardTimes === true,
+      sentToStandardTimesAt: s.sentToStandardTimesAt || null,
+      standardTimeRecordIds: Array.isArray(s.standardTimeRecordIds) ? s.standardTimeRecordIds : [],
       steps: (s.steps || []).map(step => {
         // Old format had captures:number + times:[]; new format has requiredCaptures:number + captures:[]
         const hadOldCaptures = typeof step.captures === 'number';
@@ -2423,7 +2426,10 @@ function renderTSRecordsSection(container) {
           <td><strong>${esc(s.name)}</strong></td>
           <td style="color:var(--text-muted);font-size:var(--font-13)">${date ? new Date(date).toLocaleDateString('es-MX') : '—'}</td>
           <td class="text-right">${(s.steps || []).length}</td>
-          <td>${tsBadgeForStatus(s.status)}</td>
+          <td>
+            ${tsBadgeForStatus(s.status)}
+            ${s.status === 'completed' && s.sentToStandardTimes ? '<br><span class="badge badge--success" style="font-size:10px;margin-top:2px">Enviado T.E.</span>' : ''}
+          </td>
           <td style="min-width:90px">
             <div style="font-size:var(--font-12);color:var(--text-muted);margin-bottom:3px">${done}/${total} · ${pct}%</div>
             <div class="ts-progress-bar"><div class="ts-progress-bar-fill" style="width:${pct}%"></div></div>
@@ -2616,6 +2622,9 @@ function openTimeStudyDetailModal(studyId) {
   const completedDate = study.completedAt ? new Date(study.completedAt).toLocaleDateString('es-MX') : null;
   const isCompleted = study.status === 'completed';
   const canFinalize = !isCompleted && steps.length > 0 && steps.every(s => s.isComplete);
+  const canSendToST = isCompleted
+    && steps.length > 0
+    && steps.every(s => s.isComplete && typeof s.averageTime === 'number' && s.averageTime > 0);
 
   const stepRows = steps.map((step, i) => {
     const taken = (step.captures || []).length;
@@ -2654,6 +2663,42 @@ function openTimeStudyDetailModal(studyId) {
     `;
   }).join('');
 
+  const maxCaptures = steps.reduce((m, s) => Math.max(m, (s.captures || []).length), 0);
+  const capturesMatrixHTML = steps.length > 0 && maxCaptures > 0 ? `
+    <details style="margin-bottom:var(--sp-5)">
+      <summary style="cursor:pointer;font-weight:600;font-size:var(--font-13);padding:var(--sp-3) var(--sp-4);background:var(--surface-2,#f8f9fa);border:1px solid var(--border);border-radius:var(--radius);list-style:none;display:flex;align-items:center;justify-content:space-between;user-select:none">
+        <span>Detalle de tomas por actividad</span>
+        <span style="font-size:var(--font-12);color:var(--text-muted);font-weight:400">${steps.length} actividad${steps.length === 1 ? '' : 'es'} &middot; ${maxCaptures} toma${maxCaptures === 1 ? '' : 's'} máx.</span>
+      </summary>
+      <div style="border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);overflow-x:auto">
+        <table class="time-study-table" style="font-size:var(--font-12)">
+          <thead>
+            <tr>
+              <th style="min-width:130px">Actividad</th>
+              ${Array.from({length: maxCaptures}, (_, i) => `<th class="text-right" style="width:76px">Toma ${i + 1}</th>`).join('')}
+              <th class="text-right" style="width:88px;background:var(--surface-2,#f8f9fa)">Promedio</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${steps.map(step => {
+              const caps = step.captures || [];
+              const avg = step.averageTime != null ? fmtMs(step.averageTime) : '—';
+              const cells = Array.from({length: maxCaptures}, (_, i) => {
+                const c = caps[i];
+                return `<td class="text-right font-mono" style="color:${c ? 'inherit' : 'var(--text-muted)'}">${c ? fmtMs(c.valueMs) : '—'}</td>`;
+              }).join('');
+              return `<tr>
+                <td style="font-weight:500">${esc(step.name)}</td>
+                ${cells}
+                <td class="text-right font-mono" style="font-weight:700;background:var(--surface-2,#f8f9fa)">${avg}</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  ` : '';
+
   const completedStepsForPrep = steps.filter(s => s.isComplete);
   const completedStepsRows = completedStepsForPrep.length > 0
     ? completedStepsForPrep.map(step => {
@@ -2684,11 +2729,11 @@ function openTimeStudyDetailModal(studyId) {
         <div class="ts-detail-summary-title">Resumen del estudio</div>
         <div class="ts-detail-summary-grid">
           <div class="ts-detail-stat">
-            <span class="ts-detail-stat-label">Pasos completos</span>
+            <span class="ts-detail-stat-label">Actividades completas</span>
             <span class="ts-detail-stat-value ${pendingSteps > 0 ? 'ts-detail-stat-value--warn' : 'ts-detail-stat-value--ok'}">${completeSteps}/${steps.length}</span>
           </div>
           <div class="ts-detail-stat">
-            <span class="ts-detail-stat-label">Pasos pendientes</span>
+            <span class="ts-detail-stat-label">Actividades pendientes</span>
             <span class="ts-detail-stat-value ${pendingSteps > 0 ? 'ts-detail-stat-value--warn' : ''}">${pendingSteps}</span>
           </div>
           <div class="ts-detail-stat">
@@ -2714,7 +2759,7 @@ function openTimeStudyDetailModal(studyId) {
           <thead>
             <tr>
               <th style="width:40px">No.</th>
-              <th>Paso</th>
+              <th>Actividad</th>
               <th class="text-right" style="width:80px">Requerid.</th>
               <th class="text-right" style="width:70px">Tomadas</th>
               <th style="width:90px">Progreso</th>
@@ -2723,18 +2768,29 @@ function openTimeStudyDetailModal(studyId) {
               <th style="min-width:220px">Acciones</th>
             </tr>
           </thead>
-          <tbody>${stepRows || '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Sin pasos</td></tr>'}</tbody>
+          <tbody>${stepRows || '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Sin actividades</td></tr>'}</tbody>
         </table>
       </div>
+
+      ${capturesMatrixHTML}
 
       ${isCompleted ? `
       <div style="margin-bottom:var(--sp-5);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
         <div style="background:var(--surface-2,#f8f9fa);padding:var(--sp-3) var(--sp-4);display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;border-bottom:1px solid var(--border)">
           <div>
             <div style="font-weight:600;font-size:var(--font-14)">Preparación para tiempos estándar</div>
-            <div style="font-size:var(--font-12);color:var(--text-muted)">Vista previa de los datos disponibles para integración futura</div>
+            <div style="font-size:var(--font-12);color:var(--text-muted)">
+              ${study.sentToStandardTimes
+                ? `Enviado el ${new Date(study.sentToStandardTimesAt).toLocaleDateString('es-MX')} &middot; ${study.standardTimeRecordIds.length} operaci${study.standardTimeRecordIds.length === 1 ? 'ón generada' : 'ones generadas'}`
+                : 'Promedios listos para enviar al módulo de Tiempos Estándar'}
+            </div>
           </div>
-          <button class="btn btn--secondary btn--sm" disabled title="Disponible en la siguiente fase">Enviar a tiempos estándar</button>
+          <button class="btn btn--${study.sentToStandardTimes ? 'ghost' : 'primary'} btn--sm"
+            id="tsd-send-st"
+            ${(canSendToST && !study.sentToStandardTimes) ? '' : 'disabled'}
+            title="${study.sentToStandardTimes ? 'Este estudio ya fue enviado a tiempos estándar' : (canSendToST ? 'Enviar promedios al módulo de Tiempos Estándar' : 'El estudio debe estar completado con todos los promedios calculados')}">
+            ${study.sentToStandardTimes ? 'Ya enviado' : 'Enviar a tiempos estándar'}
+          </button>
         </div>
         <div style="overflow-x:auto">
           <table class="time-study-table">
@@ -2751,7 +2807,9 @@ function openTimeStudyDetailModal(studyId) {
           </table>
         </div>
         <div style="padding:var(--sp-3) var(--sp-4);background:var(--surface-2,#f8f9fa);border-top:1px solid var(--border);font-size:var(--font-12);color:var(--text-muted)">
-          La integración con tiempos estándar estará disponible en la siguiente fase.
+          ${study.sentToStandardTimes
+            ? 'Los datos fueron enviados al módulo de Tiempos Estándar. Las capturas originales no fueron modificadas.'
+            : 'Al confirmar, se crearán operaciones en Tiempos Estándar con los promedios de cada paso. Las capturas originales no se modificarán.'}
         </div>
       </div>
       ` : ''}
@@ -2785,6 +2843,11 @@ function openTimeStudyDetailModal(studyId) {
         }
       );
     });
+    if (canSendToST && !study.sentToStandardTimes) {
+      document.getElementById('tsd-send-st')?.addEventListener('click', () => {
+        openSendToStandardTimesModal(studyId);
+      });
+    }
   } else {
     document.getElementById('tsd-finalize')?.addEventListener('click', () => {
       if (!canFinalize) return;
@@ -2831,6 +2894,146 @@ function openTimeStudyDetailModal(studyId) {
       }
     });
   });
+}
+
+function openSendToStandardTimesModal(studyId) {
+  const study = (state.timeStudies || []).find(s => s.id === studyId);
+  if (!study) return;
+
+  const steps = (study.steps || []).filter(s => s.isComplete && typeof s.averageTime === 'number' && s.averageTime > 0);
+  if (steps.length === 0) {
+    showToast('No hay pasos con promedio válido para enviar', 'warning');
+    return;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const completedDate = study.completedAt ? new Date(study.completedAt).toLocaleDateString('es-MX') : '—';
+  const existingNames = new Set((state.operations || []).map(o => o.name.toLowerCase().trim()));
+  const duplicates = steps.filter(s => existingNames.has(s.name.toLowerCase().trim()));
+
+  const stepRows = steps.map(step => {
+    const avgSec = (step.averageTime / 1000).toFixed(2);
+    const taken = (step.captures || []).length;
+    const isDup = existingNames.has(step.name.toLowerCase().trim());
+    const finalName = isDup ? `${step.name} (${today})` : step.name;
+    return `
+      <tr>
+        <td>${esc(step.name)}${isDup ? `<br><small style="color:var(--warning,#b45309);font-size:10px">Se guardará como: &ldquo;${esc(finalName)}&rdquo;</small>` : ''}</td>
+        <td class="text-right font-mono">${fmtMs(step.averageTime)}</td>
+        <td class="text-right font-mono">${avgSec} s</td>
+        <td class="text-right">${taken}</td>
+        <td><span class="badge badge--success">Listo</span></td>
+      </tr>
+    `;
+  }).join('');
+
+  const dupWarning = duplicates.length > 0 ? `
+    <div style="padding:var(--sp-3) var(--sp-4);background:#fff3cd;border-radius:var(--radius);border:1px solid #ffc107;margin-bottom:var(--sp-4);font-size:var(--font-13)">
+      <strong>Atención:</strong> ${duplicates.length} paso(s) tienen el mismo nombre que operaciones ya existentes.
+      Se crearán como nuevas entradas con la fecha como sufijo para no sobrescribir datos existentes.
+    </div>
+  ` : '';
+
+  openModal('Enviar a Tiempos Estándar', `
+    <div style="padding:var(--sp-4) var(--sp-5)">
+      <div style="margin-bottom:var(--sp-4)">
+        <div style="font-size:var(--font-13);color:var(--text-muted);margin-bottom:2px">Estudio</div>
+        <div style="font-weight:600;font-size:var(--font-16)">${esc(study.name)}</div>
+        <div style="font-size:var(--font-13);color:var(--text-muted)">${steps.length} paso(s) &middot; Finalizado: ${completedDate}</div>
+      </div>
+      ${dupWarning}
+      <div style="overflow-x:auto;margin-bottom:var(--sp-4)">
+        <table class="time-study-table">
+          <thead>
+            <tr>
+              <th>Paso / Operación</th>
+              <th class="text-right" style="width:110px">Promedio (mm:ss)</th>
+              <th class="text-right" style="width:90px">Promedio (s)</th>
+              <th class="text-right" style="width:80px">Capturas</th>
+              <th style="width:80px">Estado</th>
+            </tr>
+          </thead>
+          <tbody>${stepRows}</tbody>
+        </table>
+      </div>
+      <div style="padding:var(--sp-3) var(--sp-4);background:var(--surface-2,#f8f9fa);border-radius:var(--radius);border:1px solid var(--border);font-size:var(--font-13);color:var(--text-muted);margin-bottom:var(--sp-4)">
+        Estos promedios se enviarán al módulo de Tiempos Estándar como nuevas operaciones.
+        Las capturas originales del estudio no se modificarán.
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn--ghost" id="send-st-cancel">Cancelar</button>
+        <button class="btn btn--primary" id="send-st-confirm">Confirmar envío</button>
+      </div>
+    </div>
+  `, 'modal-box--lg');
+
+  document.getElementById('send-st-cancel')?.addEventListener('click', closeModal);
+  document.getElementById('send-st-confirm')?.addEventListener('click', () => {
+    doSendStudyToStandardTimes(studyId);
+    closeModal();
+  });
+}
+
+function doSendStudyToStandardTimes(studyId) {
+  const study = (state.timeStudies || []).find(s => s.id === studyId);
+  if (!study) return;
+
+  const steps = (study.steps || []).filter(s => s.isComplete && typeof s.averageTime === 'number' && s.averageTime > 0);
+  if (steps.length === 0) {
+    showToast('No hay pasos con promedio válido para enviar', 'warning');
+    return;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const now = new Date().toISOString();
+  const existingNames = new Set((state.operations || []).map(o => o.name.toLowerCase().trim()));
+  const nextSeq = state.operations.length > 0 ? Math.max(...state.operations.map(o => o.sequence)) + 1 : 1;
+  const newIds = [];
+
+  steps.forEach((step, i) => {
+    const isDup = existingNames.has(step.name.toLowerCase().trim());
+    const opName = isDup ? `${step.name} (${today})` : step.name;
+    const standardTime = Math.round((step.averageTime / 1000) * 100) / 100;
+
+    const newOp = {
+      id: generateId('OP'),
+      sequence: nextSeq + i,
+      name: opName,
+      standardTime,
+      active: true,
+      isTemporary: false,
+      source: 'time_study',
+      sourceStudyId: study.id,
+      sourceStudyName: study.name,
+      sourceStepId: step.id,
+      capturesCount: (step.captures || []).length,
+      createdAt: now
+    };
+    state.operations.push(newOp);
+    state.standardTimes.push({
+      operationId: newOp.id,
+      version: 'v1.0',
+      status: 'active',
+      effectiveDate: today,
+      updatedAt: today,
+      updatedBy: `Estudio: ${study.name}`,
+      isTemporary: false
+    });
+    newIds.push(newOp.id);
+  });
+
+  study.sentToStandardTimes = true;
+  study.sentToStandardTimesAt = now;
+  study.standardTimeRecordIds = newIds;
+  study.updatedAt = now;
+
+  state.operations.sort((a, b) => a.sequence - b.sequence);
+  state.stationAssignments = autoBalanceOperations();
+  saveState();
+
+  const count = steps.length;
+  showToast(`${count} operaci${count === 1 ? 'ón enviada' : 'ones enviadas'} a Tiempos Estándar`, 'success');
+  renderPage('timeStudy');
 }
 
 function openStepCapturesModal(studyId, stepId) {

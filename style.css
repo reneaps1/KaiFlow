@@ -918,6 +918,8 @@ tbody tr.row--warning { background: #FFFBEB; }
   padding: var(--sp-4);
 }
 
+#confirm-backdrop { z-index: 600; }
+
 .modal-backdrop.hidden { display: none; }
 
 .modal-box {
