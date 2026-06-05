@@ -2634,12 +2634,6 @@ function renderTSRecordsSection(container) {
       <div class="card">
         <div class="card-header">
           <div class="card-title">Estudios guardados</div>
-          <div class="btn-group">
-            <label class="btn btn--secondary btn--sm" style="cursor:pointer" title="Importar estudios desde JSON">
-              Importar JSON
-              <input type="file" accept=".json,application/json" style="display:none" id="ts-import-input" />
-            </label>
-          </div>
         </div>
         <div class="card-body">
           <div class="ts-empty-state">
@@ -2649,7 +2643,6 @@ function renderTSRecordsSection(container) {
         </div>
       </div>
     `;
-    _bindTSImportInput(container, container);
     return;
   }
 
@@ -2662,11 +2655,6 @@ function renderTSRecordsSection(container) {
           <span class="badge badge--neutral">${studies.length}</span>
         </div>
         <div class="btn-group" style="flex-wrap:wrap;gap:var(--sp-2)">
-          <button class="btn btn--secondary btn--sm" id="ts-export-all" title="Exportar todos los estudios como JSON">Exportar todos JSON</button>
-          <label class="btn btn--secondary btn--sm" style="cursor:pointer" title="Importar estudios desde JSON">
-            Importar JSON
-            <input type="file" accept=".json,application/json" style="display:none" id="ts-import-input" />
-          </label>
           <button class="btn btn--secondary btn--sm" id="ts-export-all-csv" title="Exportar todos los estudios como CSV">Exportar todos CSV</button>
           <button class="btn btn--secondary btn--sm" id="ts-export-summary-csv" title="Exportar resumen de estudios como CSV">Exportar resumen CSV</button>
         </div>
@@ -2778,7 +2766,6 @@ function renderTSRecordsSection(container) {
               <button class="btn btn--ghost btn--sm" data-ts-action="view"      data-study-id="${esc(s.id)}" title="Ver detalle">Ver</button>
               <button class="btn btn--ghost btn--sm" data-ts-action="edit"      data-study-id="${esc(s.id)}" title="Editar">Editar</button>
               <button class="btn btn--ghost btn--sm" data-ts-action="duplicate" data-study-id="${esc(s.id)}" title="Duplicar">Duplicar</button>
-              <button class="btn btn--ghost btn--sm" data-ts-action="export"     data-study-id="${esc(s.id)}" title="Exportar JSON">Exportar JSON</button>
               <button class="btn btn--ghost btn--sm" data-ts-action="export-csv" data-study-id="${esc(s.id)}" title="Exportar CSV">Exportar CSV</button>
               <button class="btn btn--ghost btn--sm ts-btn-danger" data-ts-action="delete" data-study-id="${esc(s.id)}" title="Eliminar">Eliminar</button>
             </div>
@@ -2794,7 +2781,6 @@ function renderTSRecordsSection(container) {
         if      (action === 'view')      openTimeStudyDetailModal(id);
         else if (action === 'edit')      openEditTimeStudyModal(id, () => renderTSRecordsSection(container));
         else if (action === 'duplicate') { tsDuplicateStudy(id); renderTSRecordsSection(container); }
-        else if (action === 'export')     tsExportStudy(id);
         else if (action === 'export-csv') tsExportStudyCsv(id);
         else if (action === 'delete')     tsDeleteStudy(id, container);
       });
@@ -2816,10 +2802,8 @@ function renderTSRecordsSection(container) {
     refreshTable();
   });
 
-  container.querySelector('#ts-export-all')?.addEventListener('click', tsExportAllStudies);
   container.querySelector('#ts-export-all-csv')?.addEventListener('click', tsExportAllStudiesCsv);
   container.querySelector('#ts-export-summary-csv')?.addEventListener('click', tsExportStudiesSummaryCsv);
-  _bindTSImportInput(container, container);
 }
 
 function openNewTimeStudyModal() {
