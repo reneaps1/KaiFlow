@@ -4191,7 +4191,349 @@ function closeStopwatchModal() {
   renderPage('timeStudy');
 }
 
+// ── FASE 9: Análisis real de estudios de tiempo ───────────────────────────
+
+function tsFreqGetStudiesBySource(source, studyId) {
+  const all = state.timeStudies || [];
+  if (source === 'completed')   return all.filter(s => s.status === 'completed');
+  if (source === 'in_progress') return all.filter(s => s.status === 'in_progress');
+  if (source === 'specific') {
+    const found = all.find(s => s.id === studyId);
+    return found ? [found] : [];
+  }
+  return all;
+}
+
+function tsFreqBuildActivityRows(studies) {
+  const map = new Map();
+  for (const study of studies) {
+    for (const step of (study.steps || [])) {
+      const name = (step.name || '').trim();
+      if (!name) continue;
+      if (!map.has(name)) {
+        map.set(name, { name, occurrences: 0, studyIds: new Set(), studyNames: new Set(), allCaptures: [] });
+      }
+      const entry = map.get(name);
+      entry.occurrences++;
+      entry.studyIds.add(study.id);
+      entry.studyNames.add(study.name);
+      const caps = (step.captures || []).filter(c => c.valueMs != null).map(c => c.valueMs);
+      entry.allCaptures.push(...caps);
+    }
+  }
+  return Array.from(map.values()).map(entry => {
+    const caps = entry.allCaptures;
+    const n = caps.length;
+    const avgTime = n > 0 ? caps.reduce((s, v) => s + v, 0) / n : null;
+    const minTime = n > 0 ? Math.min(...caps) : null;
+    const maxTime = n > 0 ? Math.max(...caps) : null;
+    const rangeMs = (minTime != null && maxTime != null) ? maxTime - minTime : null;
+    // Impacto estimado = frecuencia × tiempo promedio
+    const estimatedImpact = (entry.occurrences > 0 && avgTime != null) ? entry.occurrences * avgTime : null;
+    return {
+      name: entry.name,
+      occurrences: entry.occurrences,
+      studiesCount: entry.studyIds.size,
+      studyNames: Array.from(entry.studyNames),
+      capturesCount: n,
+      avgTime, minTime, maxTime, rangeMs, estimatedImpact
+    };
+  }).sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name));
+}
+
+function tsFreqExportAnalysisCsv() {
+  const source  = state.tsFreqSource  || 'completed';
+  const studyId = state.tsFreqStudyId || null;
+  const rows    = tsFreqBuildActivityRows(tsFreqGetStudiesBySource(source, studyId));
+  if (rows.length === 0) { showToast('No hay datos para exportar', 'warning'); return; }
+  const HEADERS = [
+    'activity_name','occurrences','studies_count','captures_count',
+    'average_time_ms','average_time_formatted',
+    'min_time_ms','min_time_formatted',
+    'max_time_ms','max_time_formatted',
+    'range_ms','range_formatted',
+    'estimated_impact_ms','estimated_impact_formatted',
+    'study_names'
+  ];
+  const csvRows = rows.map(r => [
+    r.name, r.occurrences, r.studiesCount, r.capturesCount,
+    r.avgTime         != null ? Math.round(r.avgTime)         : '',
+    r.avgTime         != null ? fmtMs(r.avgTime)              : '',
+    r.minTime         != null ? Math.round(r.minTime)         : '',
+    r.minTime         != null ? fmtMs(r.minTime)              : '',
+    r.maxTime         != null ? Math.round(r.maxTime)         : '',
+    r.maxTime         != null ? fmtMs(r.maxTime)              : '',
+    r.rangeMs         != null ? Math.round(r.rangeMs)         : '',
+    r.rangeMs         != null ? fmtMs(r.rangeMs)              : '',
+    r.estimatedImpact != null ? Math.round(r.estimatedImpact) : '',
+    r.estimatedImpact != null ? fmtMs(r.estimatedImpact)      : '',
+    r.studyNames.join(' | ')
+  ].map(tsEscapeCsvValue).join(','));
+  tsDownloadTextFile(
+    'kaiflow-analisis-frecuencias-estudios-tiempo.csv',
+    [HEADERS.join(','), ...csvRows].join('\r\n')
+  );
+  showToast(`Análisis exportado: ${rows.length} actividad(es)`, 'success');
+}
+
+function renderTSFreqRealDataSection(container) {
+  const source  = state.tsFreqSource       || 'completed';
+  const studyId = state.tsFreqStudyId      || null;
+  const search  = (state.tsFreqSearch      || '').toLowerCase().trim();
+  const minCaps = parseInt(state.tsFreqMinCaptures || 0) || 0;
+
+  const allStudies = state.timeStudies || [];
+  const selStudies = tsFreqGetStudiesBySource(source, studyId);
+  const allRows    = tsFreqBuildActivityRows(selStudies);
+
+  let rows = allRows;
+  if (search)      rows = rows.filter(r => r.name.toLowerCase().includes(search));
+  if (minCaps > 0) rows = rows.filter(r => r.capturesCount >= minCaps);
+
+  const studiesCount     = selStudies.length;
+  const uniqueActivities = allRows.length;
+  const totalCaptures    = allRows.reduce((s, r) => s + r.capturesCount, 0);
+  const mostFrequent     = allRows.length > 0 ? allRows[0] : null;
+  const highestAvg       = [...allRows].filter(r => r.avgTime != null).sort((a, b) => b.avgTime - a.avgTime)[0] || null;
+  const highestImpact    = [...allRows].filter(r => r.estimatedImpact != null).sort((a, b) => b.estimatedImpact - a.estimatedImpact)[0] || null;
+
+  const top5Freq   = [...allRows].sort((a, b) => b.occurrences - a.occurrences).slice(0, 5);
+  const top5Avg    = [...allRows].filter(r => r.avgTime != null).sort((a, b) => b.avgTime - a.avgTime).slice(0, 5);
+  const top5Impact = [...allRows].filter(r => r.estimatedImpact != null).sort((a, b) => b.estimatedImpact - a.estimatedImpact).slice(0, 5);
+
+  let emptyMsg = '';
+  if (allStudies.length === 0) {
+    emptyMsg = 'Aún no hay estudios de tiempo disponibles para analizar.';
+  } else if (source === 'completed' && selStudies.length === 0) {
+    emptyMsg = 'No hay estudios completados. Finaliza un estudio para analizarlo.';
+  } else if (source === 'in_progress' && selStudies.length === 0) {
+    emptyMsg = 'No hay estudios en progreso.';
+  } else if (source === 'specific' && !studyId) {
+    emptyMsg = 'Selecciona un estudio específico para analizar.';
+  } else if (source === 'specific' && studyId && selStudies.length === 0) {
+    emptyMsg = 'El estudio seleccionado no fue encontrado.';
+  } else if (allRows.length === 0 && selStudies.length > 0) {
+    emptyMsg = 'Los estudios seleccionados no tienen capturas registradas.';
+  }
+
+  const sourceOptions = [
+    { val: 'completed',   label: 'Completados' },
+    { val: 'in_progress', label: 'En progreso' },
+    { val: 'all',         label: 'Todos' },
+    { val: 'specific',    label: 'Específico' }
+  ];
+
+  const studySelectorHtml = source === 'specific' ? `
+    <div class="form-group mt-4">
+      <label class="form-label">Seleccionar estudio</label>
+      <select class="form-input" id="tsfa-study-select" style="max-width:420px">
+        <option value="">— Elige un estudio —</option>
+        ${allStudies.map(s => {
+          const lbl = s.status === 'completed' ? 'Completado' : s.status === 'in_progress' ? 'En progreso' : 'Borrador';
+          return `<option value="${esc(s.id)}" ${s.id === studyId ? 'selected' : ''}>${esc(s.name)} · ${lbl} · ${(s.steps||[]).length} act.</option>`;
+        }).join('')}
+      </select>
+    </div>
+  ` : '';
+
+  const rankHtml = (title, items, fmtFn) => `
+    <div class="card">
+      <div class="card-header"><div class="card-title" style="font-size:var(--font-13)">${esc(title)}</div></div>
+      <div style="overflow-x:auto">
+        <table class="time-study-table" style="font-size:var(--font-13)">
+          <thead><tr><th style="width:28px">#</th><th>Actividad</th><th class="text-right">Valor</th></tr></thead>
+          <tbody>
+            ${items.length > 0 ? items.map((r, i) => `
+              <tr>
+                <td class="font-mono" style="color:var(--text-muted)">${i + 1}</td>
+                <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.name)}">${esc(r.name)}</td>
+                <td class="text-right font-mono">${fmtFn(r)}</td>
+              </tr>
+            `).join('') : `<tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:var(--sp-3)">Sin datos</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+
+  const tableRowsHtml = rows.length > 0 ? rows.map((r, i) => `
+    <tr>
+      <td class="font-mono" style="color:var(--text-muted)">${i + 1}</td>
+      <td>${esc(r.name)}</td>
+      <td class="text-right font-mono">${r.occurrences}</td>
+      <td class="text-right font-mono">${r.studiesCount}</td>
+      <td class="text-right font-mono">${r.capturesCount}</td>
+      <td class="text-right font-mono">${r.avgTime    != null ? fmtMs(r.avgTime)          : '—'}</td>
+      <td class="text-right font-mono">${r.minTime    != null ? fmtMs(r.minTime)          : '—'}</td>
+      <td class="text-right font-mono">${r.maxTime    != null ? fmtMs(r.maxTime)          : '—'}</td>
+      <td class="text-right font-mono">${r.rangeMs    != null ? fmtMs(r.rangeMs)          : '—'}</td>
+      <td class="text-right font-mono">${r.estimatedImpact != null ? fmtMs(r.estimatedImpact) : '—'}</td>
+    </tr>
+  `).join('') : `<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:var(--sp-6)">${esc(emptyMsg || 'Los filtros no devuelven resultados.')}</td></tr>`;
+
+  container.innerHTML = `
+    <div class="card mb-6">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Análisis de estudios de tiempo</div>
+          <div class="card-subtitle">Frecuencias, tiempos y actividades agrupadas desde estudios reales</div>
+        </div>
+        <button class="btn btn--secondary btn--sm" id="tsfa-export-csv">Exportar análisis CSV</button>
+      </div>
+      <div class="card-body">
+        <div class="form-group">
+          <label class="form-label">Fuente de análisis</label>
+          <div class="btn-group">
+            ${sourceOptions.map(opt => `
+              <button class="btn ${source === opt.val ? 'btn--primary' : 'btn--ghost'} btn--sm" data-tsfa-source="${esc(opt.val)}">${esc(opt.label)}</button>
+            `).join('')}
+          </div>
+        </div>
+        ${studySelectorHtml}
+      </div>
+    </div>
+
+    ${emptyMsg && allRows.length === 0 ? `
+      <div class="card mb-6">
+        <div class="card-body">
+          <div class="ts-empty-state">
+            <div class="ts-empty-state-title">${esc(emptyMsg)}</div>
+          </div>
+        </div>
+      </div>
+    ` : `
+      <div class="kpi-grid mb-6" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+        <div class="kpi-card">
+          <div class="kpi-label">Estudios analizados</div>
+          <div class="kpi-value">${studiesCount}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Actividades únicas</div>
+          <div class="kpi-value">${uniqueActivities}</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-label">Capturas analizadas</div>
+          <div class="kpi-value">${totalCaptures}</div>
+        </div>
+        ${mostFrequent ? `
+        <div class="kpi-card">
+          <div class="kpi-label">Más frecuente</div>
+          <div class="kpi-value" style="font-size:var(--font-14);line-height:1.3;word-break:break-word">${esc(mostFrequent.name)}</div>
+          <div class="kpi-meta">${mostFrequent.occurrences} aparición(es)</div>
+        </div>` : ''}
+        ${highestAvg ? `
+        <div class="kpi-card">
+          <div class="kpi-label">Mayor promedio</div>
+          <div class="kpi-value" style="font-size:var(--font-14);line-height:1.3;word-break:break-word">${esc(highestAvg.name)}</div>
+          <div class="kpi-meta">${fmtMs(highestAvg.avgTime)}</div>
+        </div>` : ''}
+        ${highestImpact ? `
+        <div class="kpi-card kpi-card--warning">
+          <div class="kpi-label">Mayor impacto</div>
+          <div class="kpi-value" style="font-size:var(--font-14);line-height:1.3;word-break:break-word">${esc(highestImpact.name)}</div>
+          <div class="kpi-meta">${fmtMs(highestImpact.estimatedImpact)}</div>
+        </div>` : ''}
+      </div>
+
+      <div class="card mb-6">
+        <div class="card-header"><div class="card-title">Filtros</div></div>
+        <div class="card-body">
+          <div style="display:flex;flex-wrap:wrap;gap:var(--sp-4);align-items:flex-end">
+            <div class="form-group" style="flex:1;min-width:200px;margin:0">
+              <label class="form-label">Buscar actividad</label>
+              <input class="form-input" id="tsfa-search" type="text" placeholder="Nombre de actividad…" value="${esc(state.tsFreqSearch || '')}">
+            </div>
+            <div class="form-group" style="width:160px;margin:0">
+              <label class="form-label">Mínimo de capturas</label>
+              <input class="form-input" id="tsfa-min-caps" type="number" min="0" step="1" value="${minCaps}" placeholder="0">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card mb-6">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Tabla de frecuencias por actividad</div>
+            <div class="card-subtitle">Impacto estimado = apariciones × tiempo promedio</div>
+          </div>
+        </div>
+        <div style="overflow-x:auto">
+          <table class="time-study-table">
+            <thead>
+              <tr>
+                <th style="width:40px">#</th>
+                <th>Actividad</th>
+                <th class="text-right" style="width:70px">Frec.</th>
+                <th class="text-right" style="width:75px">Estudios</th>
+                <th class="text-right" style="width:80px">Capturas</th>
+                <th class="text-right" style="width:100px">Promedio</th>
+                <th class="text-right" style="width:100px">Mínimo</th>
+                <th class="text-right" style="width:100px">Máximo</th>
+                <th class="text-right" style="width:100px">Rango</th>
+                <th class="text-right" style="width:110px">Impacto est.</th>
+              </tr>
+            </thead>
+            <tbody>${tableRowsHtml}</tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--sp-4);margin-bottom:var(--sp-6)">
+        ${rankHtml('Top 5 · Más frecuentes',        top5Freq,   r => r.occurrences + ' aparición(es)')}
+        ${rankHtml('Top 5 · Mayor tiempo promedio',  top5Avg,    r => fmtMs(r.avgTime))}
+        ${rankHtml('Top 5 · Mayor impacto',          top5Impact, r => fmtMs(r.estimatedImpact))}
+      </div>
+    `}
+  `;
+
+  container.querySelectorAll('[data-tsfa-source]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.tsFreqSource = btn.dataset.tsfaSource;
+      if (state.tsFreqSource !== 'specific') state.tsFreqStudyId = null;
+      saveState();
+      renderTSFreqRealDataSection(container);
+    });
+  });
+
+  container.querySelector('#tsfa-study-select')?.addEventListener('change', e => {
+    state.tsFreqStudyId = e.target.value || null;
+    saveState();
+    renderTSFreqRealDataSection(container);
+  });
+
+  container.querySelector('#tsfa-search')?.addEventListener('input', e => {
+    state.tsFreqSearch = e.target.value;
+    saveState();
+    renderTSFreqRealDataSection(container);
+  });
+
+  container.querySelector('#tsfa-min-caps')?.addEventListener('input', e => {
+    state.tsFreqMinCaptures = parseInt(e.target.value) || 0;
+    saveState();
+    renderTSFreqRealDataSection(container);
+  });
+
+  container.querySelector('#tsfa-export-csv')?.addEventListener('click', tsFreqExportAnalysisCsv);
+}
+
+// ── FASE 9 end ────────────────────────────────────────────────────────────
+
 function renderTSFrequencySection(container) {
+  container.innerHTML = `
+    <div id="tsfa-real-data-section"></div>
+    <div style="border-top:2px solid var(--border);margin:var(--sp-6) 0 var(--sp-4)">
+      <div style="font-size:var(--font-12);font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-top:var(--sp-4)">
+        Frecuencias por subconjunto · Integración Tiempos Estándar
+      </div>
+    </div>
+    <div id="tsfa-subset-section"></div>
+  `;
+  renderTSFreqRealDataSection(container.querySelector('#tsfa-real-data-section'));
+  _renderTSSubsetFreqPanel(container.querySelector('#tsfa-subset-section'), container);
+}
+
+function _renderTSSubsetFreqPanel(container, mainContainer) {
   ensureTimeStudyStructure();
   const { station, subset } = getSelectedTimeStudyContext();
 
@@ -4373,7 +4715,7 @@ function renderTSFrequencySection(container) {
       state.timeStudySelection.stationId = nextStation.id;
       state.timeStudySelection.subsetId = nextStation.subconjuntos[0]?.id;
       saveState();
-      renderTSFrequencySection(container);
+      renderTSFrequencySection(mainContainer);
     });
   });
 
@@ -4381,7 +4723,7 @@ function renderTSFrequencySection(container) {
     btn.addEventListener('click', () => {
       state.timeStudySelection.subsetId = btn.dataset.tsSubset;
       saveState();
-      renderTSFrequencySection(container);
+      renderTSFrequencySection(mainContainer);
     });
   });
 
@@ -4391,7 +4733,7 @@ function renderTSFrequencySection(container) {
       state.timeStudySelection.stationId = stationId;
       state.timeStudySelection.subsetId = subsetId;
       saveState();
-      renderTSFrequencySection(container);
+      renderTSFrequencySection(mainContainer);
     });
   });
 
@@ -4416,7 +4758,7 @@ function renderTSFrequencySection(container) {
   container.querySelector('#ts-reset-subset')?.addEventListener('click', () => {
     subset.actividades.forEach(activity => { activity.frequency = 0; });
     saveState();
-    renderTSFrequencySection(container);
+    renderTSFrequencySection(mainContainer);
     showToast(`Frecuencias limpiadas para ${subset.name}`, 'success');
   });
 }
