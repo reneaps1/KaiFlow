@@ -19,6 +19,9 @@ let _catalogCreatedInitial = false;
 let _catalogOpenStationIds = new Set();
 let _activeUser = null;
 
+// Stopwatch runtime state (not persisted)
+let _sw = { active: false, startMs: 0, elapsedMs: 0, lastLapMs: 0, mode: 'reset', studyId: null, stepId: null, rafId: null };
+
 const DASHBOARD_LINES_BY_AREA = {
   Interior: [
     'SUB ENSAMBLE 1',
@@ -243,6 +246,14 @@ function fmt(n, decimals = 1) {
 
 function fmtPct(n) {
   return fmt(n, 1) + '%';
+}
+
+function fmtMs(ms) {
+  const cs = Math.floor(Math.max(0, ms) / 10);
+  const cc = cs % 100;
+  const ss = Math.floor(cs / 100) % 60;
+  const mm = Math.floor(cs / 6000);
+  return `${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}.${String(cc).padStart(2, '0')}`;
 }
 
 function normalizeManufacturingCatalog() {
@@ -2230,8 +2241,10 @@ function openTimeStudyDetailModal(studyId) {
           ? '<span class="badge badge--success">Completo</span>'
           : '<span class="badge badge--neutral">Pendiente</span>'}</td>
         <td>
-          <button class="btn btn--ghost btn--sm" disabled
-            title="Cronómetro disponible en la siguiente fase">Continuar captura</button>
+          <button class="btn ${complete ? 'btn--ghost' : 'btn--primary'} btn--sm"
+            data-ts-open-sw="${esc(study.id)}" data-step-id="${esc(step.id)}">
+            ${complete ? 'Ver capturas' : 'Continuar captura'}
+          </button>
         </td>
       </tr>
     `;
@@ -2268,6 +2281,15 @@ function openTimeStudyDetailModal(studyId) {
   `);
 
   document.getElementById('tsd-close')?.addEventListener('click', closeModal);
+
+  document.querySelectorAll('[data-ts-open-sw]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const sid = btn.dataset.tsOpenSw;
+      const pid = btn.dataset.stepId;
+      closeModal();
+      openStopwatchModal(sid, pid);
+    });
+  });
 }
 
 function openEditTimeStudyModal(studyId, onSave) {
@@ -2429,6 +2451,315 @@ function tsDeleteStudy(studyId, container) {
       renderTSRecordsSection(container);
     }
   );
+}
+
+// ── Time Study: capture data layer ────────────
+function tsGetStudy(studyId) {
+  return (state.timeStudies || []).find(s => s.id === studyId) || null;
+}
+
+function tsGetStep(study, stepId) {
+  return (study?.steps || []).find(s => s.id === stepId) || null;
+}
+
+function tsRecalcStep(step) {
+  const captures = step.captures || [];
+  step.isComplete = captures.length >= step.requiredCaptures;
+  if (captures.length > 0) {
+    const sum = captures.reduce((total, c) => total + c.valueMs, 0);
+    step.averageTime = sum / captures.length;
+  } else {
+    step.averageTime = null;
+  }
+}
+
+function tsUpdateStudyStatus(study) {
+  const steps = study.steps || [];
+  if (steps.length === 0) { study.status = 'draft'; return; }
+  const totalCaptures = steps.reduce((sum, s) => sum + (s.captures || []).length, 0);
+  if (totalCaptures === 0) { study.status = 'draft'; return; }
+  study.status = steps.every(s => s.isComplete) ? 'completed' : 'in_progress';
+}
+
+function tsAddCapture(studyId, stepId, valueMs) {
+  const study = tsGetStudy(studyId);
+  if (!study) return false;
+  const step = tsGetStep(study, stepId);
+  if (!step) return false;
+  if (!Array.isArray(step.captures)) step.captures = [];
+  if (step.captures.length >= step.requiredCaptures) return false;
+  step.captures.push({
+    id: generateId('CAP'),
+    valueMs,
+    label: `Tiempo ${step.captures.length + 1}`,
+    createdAt: new Date().toISOString()
+  });
+  tsRecalcStep(step);
+  tsUpdateStudyStatus(study);
+  study.updatedAt = new Date().toISOString();
+  saveState();
+  return true;
+}
+
+function tsDiscardLastCapture(studyId, stepId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return false;
+  const step = tsGetStep(study, stepId);
+  if (!step || !Array.isArray(step.captures) || step.captures.length === 0) return false;
+  step.captures.pop();
+  tsRecalcStep(step);
+  tsUpdateStudyStatus(study);
+  study.updatedAt = new Date().toISOString();
+  saveState();
+  return true;
+}
+
+// ── Stopwatch: core ───────────────────────────
+function swGetElapsed() {
+  if (!_sw.active) return _sw.elapsedMs;
+  return _sw.elapsedMs + (Date.now() - _sw.startMs);
+}
+
+function swStop() {
+  if (_sw.rafId) { cancelAnimationFrame(_sw.rafId); _sw.rafId = null; }
+  if (_sw.active) {
+    _sw.elapsedMs += Date.now() - _sw.startMs;
+    _sw.active = false;
+  }
+}
+
+function swLoop() {
+  const display = document.getElementById('sw-timer-display');
+  if (display && _sw.active) {
+    display.textContent = fmtMs(swGetElapsed());
+    _sw.rafId = requestAnimationFrame(swLoop);
+  }
+}
+
+function buildCapturesHTML(step) {
+  const captures = step.captures || [];
+  if (captures.length === 0) {
+    return `<div class="sw-no-captures">Aún no hay capturas</div>`;
+  }
+  return `
+    <table class="sw-captures-table">
+      <thead><tr><th>Captura</th><th class="text-right">Tiempo</th></tr></thead>
+      <tbody>
+        ${captures.map(c => `
+          <tr>
+            <td>${esc(c.label || '')}</td>
+            <td class="text-right font-mono">${fmtMs(c.valueMs)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+}
+
+function buildStopwatchHTML(study, step) {
+  const taken      = (step.captures || []).length;
+  const needed     = step.requiredCaptures || 0;
+  const isComplete = step.isComplete || taken >= needed;
+  const remaining  = Math.max(0, needed - taken);
+
+  return `
+    <div class="sw-box">
+      <div class="sw-header">
+        <div class="sw-study-name">${esc(study.name)}</div>
+        <button class="sw-close-btn" id="sw-close" aria-label="Cerrar">&times;</button>
+      </div>
+
+      <div class="sw-step-info">
+        <span class="sw-step-name">${esc(step.name)}</span>
+        <span class="sw-step-progress">${taken}/${needed}</span>
+        <span class="sw-step-status ${isComplete ? 'sw-status--complete' : 'sw-status--pending'}">
+          ${isComplete ? 'Completado' : 'Pendiente'}
+        </span>
+      </div>
+
+      <div class="sw-mode-selector">
+        <label class="sw-mode-opt">
+          <input type="radio" name="sw-mode" value="reset" ${_sw.mode === 'reset' ? 'checked' : ''} />
+          <span>Reiniciar por vuelta</span>
+        </label>
+        <label class="sw-mode-opt">
+          <input type="radio" name="sw-mode" value="continuous" ${_sw.mode === 'continuous' ? 'checked' : ''} />
+          <span>Modo continuo</span>
+        </label>
+      </div>
+
+      <div class="sw-timer-display" id="sw-timer-display">${fmtMs(_sw.elapsedMs)}</div>
+
+      <div class="sw-controls">
+        <button class="btn sw-btn sw-btn--start" id="sw-start">${_sw.active ? 'Pausar' : 'Iniciar'}</button>
+        <button class="btn sw-btn sw-btn--lap" id="sw-lap" ${isComplete ? 'disabled' : ''}>Vuelta</button>
+        <button class="btn sw-btn sw-btn--secondary" id="sw-reset">Reiniciar</button>
+        <button class="btn sw-btn sw-btn--secondary" id="sw-discard" ${taken === 0 ? 'disabled' : ''}>Descartar última</button>
+        <button class="btn sw-btn sw-btn--secondary" id="sw-repeat" ${taken === 0 ? 'disabled' : ''}>Repetir última</button>
+      </div>
+
+      <div class="sw-captures-section">
+        <div class="sw-captures-header">
+          <span>Capturas</span>
+          ${step.averageTime != null ? `<span class="sw-avg">Promedio: <strong>${fmtMs(step.averageTime)}</strong></span>` : '<span></span>'}
+        </div>
+        <div class="sw-captures-list" id="sw-captures-list">${buildCapturesHTML(step)}</div>
+        <div class="sw-captures-remaining" id="sw-captures-remaining">
+          ${isComplete ? 'Paso completado' : remaining > 0 ? `Capturas restantes: <strong>${remaining}</strong>` : ''}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function swRefreshStepInfo(overlay) {
+  const study = tsGetStudy(_sw.studyId);
+  const step  = tsGetStep(study, _sw.stepId);
+  if (!study || !step) return;
+
+  const taken      = (step.captures || []).length;
+  const needed     = step.requiredCaptures || 0;
+  const isComplete = step.isComplete;
+  const remaining  = Math.max(0, needed - taken);
+
+  const progressEl   = overlay.querySelector('.sw-step-progress');
+  const statusEl     = overlay.querySelector('.sw-step-status');
+  const lapBtn       = overlay.querySelector('#sw-lap');
+  const discardBtn   = overlay.querySelector('#sw-discard');
+  const repeatBtn    = overlay.querySelector('#sw-repeat');
+  const capturesList = overlay.querySelector('#sw-captures-list');
+  const remainingEl  = overlay.querySelector('#sw-captures-remaining');
+  const captHeaderEl = overlay.querySelector('.sw-captures-header');
+
+  if (progressEl) progressEl.textContent = `${taken}/${needed}`;
+  if (statusEl) {
+    statusEl.textContent = isComplete ? 'Completado' : 'Pendiente';
+    statusEl.className = `sw-step-status ${isComplete ? 'sw-status--complete' : 'sw-status--pending'}`;
+  }
+  if (lapBtn)     lapBtn.disabled     = isComplete;
+  if (discardBtn) discardBtn.disabled = taken === 0;
+  if (repeatBtn)  repeatBtn.disabled  = taken === 0;
+  if (capturesList) capturesList.innerHTML = buildCapturesHTML(step);
+  if (remainingEl) remainingEl.innerHTML = isComplete
+    ? 'Paso completado'
+    : remaining > 0 ? `Capturas restantes: <strong>${remaining}</strong>` : '';
+  if (captHeaderEl) {
+    const avgSpan = captHeaderEl.querySelector('.sw-avg');
+    if (step.averageTime != null) {
+      if (avgSpan) avgSpan.innerHTML = `Promedio: <strong>${fmtMs(step.averageTime)}</strong>`;
+      else captHeaderEl.innerHTML = `<span>Capturas</span><span class="sw-avg">Promedio: <strong>${fmtMs(step.averageTime)}</strong></span>`;
+    }
+  }
+
+  if (isComplete) {
+    swStop();
+    const startBtn = overlay.querySelector('#sw-start');
+    if (startBtn) { startBtn.textContent = 'Iniciar'; startBtn.className = 'btn sw-btn sw-btn--start'; }
+    showToast(`Paso "${step.name}" completado`, 'success');
+  }
+}
+
+function bindStopwatchEvents(overlay) {
+  overlay.querySelector('#sw-close').addEventListener('click', closeStopwatchModal);
+
+  overlay.querySelectorAll('[name="sw-mode"]').forEach(radio => {
+    radio.addEventListener('change', () => { _sw.mode = radio.value; });
+  });
+
+  const startBtn = overlay.querySelector('#sw-start');
+  startBtn.addEventListener('click', () => {
+    if (_sw.active) {
+      swStop();
+      startBtn.textContent = 'Iniciar';
+      startBtn.className = 'btn sw-btn sw-btn--start';
+    } else {
+      _sw.startMs = Date.now();
+      _sw.active  = true;
+      startBtn.textContent = 'Pausar';
+      startBtn.className = 'btn sw-btn sw-btn--pause';
+      swLoop();
+    }
+  });
+
+  overlay.querySelector('#sw-lap').addEventListener('click', () => {
+    if (!_sw.active) { showToast('Inicia el cronómetro antes de registrar una vuelta', 'warning'); return; }
+    const step = tsGetStep(tsGetStudy(_sw.studyId), _sw.stepId);
+    if (!step || step.isComplete) return;
+
+    const elapsed = swGetElapsed();
+    let captureMs;
+    if (_sw.mode === 'continuous') {
+      captureMs    = elapsed - _sw.lastLapMs;
+      _sw.lastLapMs = elapsed;
+    } else {
+      captureMs   = elapsed;
+      _sw.elapsedMs = 0;
+      _sw.startMs   = Date.now();
+      _sw.lastLapMs  = 0;
+    }
+
+    if (!tsAddCapture(_sw.studyId, _sw.stepId, Math.round(captureMs))) {
+      showToast('No se pudo registrar la captura', 'warning');
+      return;
+    }
+    if (_sw.mode === 'reset') {
+      const display = overlay.querySelector('#sw-timer-display');
+      if (display) display.textContent = '00:00.00';
+    }
+    swRefreshStepInfo(overlay);
+  });
+
+  overlay.querySelector('#sw-reset').addEventListener('click', () => {
+    if (_sw.active) _sw.startMs = Date.now();
+    _sw.elapsedMs  = 0;
+    _sw.lastLapMs   = 0;
+    const display = overlay.querySelector('#sw-timer-display');
+    if (display) display.textContent = '00:00.00';
+  });
+
+  overlay.querySelector('#sw-discard').addEventListener('click', () => {
+    if (!tsDiscardLastCapture(_sw.studyId, _sw.stepId)) return;
+    swRefreshStepInfo(overlay);
+    showToast('Última captura descartada', 'info');
+  });
+
+  overlay.querySelector('#sw-repeat').addEventListener('click', () => {
+    if (!tsDiscardLastCapture(_sw.studyId, _sw.stepId)) return;
+    _sw.elapsedMs  = 0;
+    _sw.lastLapMs   = 0;
+    if (_sw.active) _sw.startMs = Date.now();
+    const display = overlay.querySelector('#sw-timer-display');
+    if (display) display.textContent = '00:00.00';
+    swRefreshStepInfo(overlay);
+    showToast('Captura eliminada. Cronómetro listo para repetir.', 'info');
+  });
+}
+
+function openStopwatchModal(studyId, stepId) {
+  const study = tsGetStudy(studyId);
+  if (!study) return;
+  const step = tsGetStep(study, stepId);
+  if (!step) return;
+
+  swStop();
+  _sw = { active: false, startMs: 0, elapsedMs: 0, lastLapMs: 0, mode: 'reset', studyId, stepId, rafId: null };
+
+  const overlay = document.createElement('div');
+  overlay.className = 'sw-overlay';
+  overlay.id        = 'sw-overlay';
+  overlay.innerHTML = buildStopwatchHTML(study, step);
+  document.body.appendChild(overlay);
+
+  bindStopwatchEvents(overlay);
+
+  if (_sw.active) swLoop();
+}
+
+function closeStopwatchModal() {
+  swStop();
+  const overlay = document.getElementById('sw-overlay');
+  if (overlay) overlay.remove();
+  renderPage('timeStudy');
 }
 
 function renderTSFrequencySection(container) {
@@ -4428,6 +4759,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Keyboard escape closes modals
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (document.getElementById('sw-overlay')) { closeStopwatchModal(); return; }
       closeModal();
       document.getElementById('confirm-backdrop')?.classList.add('hidden');
     }
