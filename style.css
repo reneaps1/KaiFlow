@@ -1598,6 +1598,23 @@ tbody tr.row--inactive:hover { opacity: 0.7; }
   text-align: center;
 }
 
+/* ── Time Study: records table actions ── */
+.ts-row-actions {
+  display: flex;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.ts-btn-danger {
+  color: var(--danger, #dc2626);
+}
+
+.ts-btn-danger:hover {
+  background: var(--danger-bg, #fee2e2);
+  border-color: var(--danger, #dc2626);
+  color: var(--danger, #dc2626);
+}
+
 /* ── Balance: station chips ── */
 .station-chips {
   display: flex;

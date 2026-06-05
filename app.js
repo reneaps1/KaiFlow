@@ -74,6 +74,7 @@ function loadState() {
   }
   _activeUser = readActiveUser();
   const catalogMigrated = normalizeManufacturingCatalog();
+  normalizeTimeStudies();
   ensureTimeStudyStructure();
   const hashPage = window.location.hash.replace('#', '');
   if (PAGE_LABELS[hashPage]) state.currentPage = hashPage;
@@ -296,6 +297,37 @@ function collectTimeStudyFrequencySeed(structure) {
     });
   });
   return seed;
+}
+
+function normalizeTimeStudies() {
+  if (!Array.isArray(state.timeStudies)) { state.timeStudies = []; return; }
+  const now = new Date().toISOString();
+  state.timeStudies = state.timeStudies.map(s => {
+    const normalStatus = s.status === 'borrador' ? 'draft' : (s.status || 'draft');
+    return {
+      id: s.id || generateId('TST'),
+      name: s.name || 'Sin nombre',
+      status: normalStatus,
+      createdAt: s.createdAt || now,
+      updatedAt: s.updatedAt || s.createdAt || now,
+      steps: (s.steps || []).map(step => {
+        // Old format had captures:number + times:[]; new format has requiredCaptures:number + captures:[]
+        const hadOldCaptures = typeof step.captures === 'number';
+        return {
+          id: step.id || generateId('STP'),
+          name: step.name || '',
+          requiredCaptures: step.requiredCaptures != null
+            ? step.requiredCaptures
+            : (hadOldCaptures ? step.captures : 1),
+          captures: Array.isArray(step.captures)
+            ? step.captures
+            : (Array.isArray(step.times) ? step.times : []),
+          averageTime: step.averageTime !== undefined ? step.averageTime : (step.average || null),
+          isComplete: step.isComplete || false
+        };
+      })
+    };
+  });
 }
 
 function ensureTimeStudyStructure() {
@@ -1915,6 +1947,7 @@ function renderStandardTimes(container) {
 }
 
 function renderTimeStudy(container) {
+  normalizeTimeStudies();
   const tab = state.timeStudyTab || 'capture';
   container.innerHTML = `
     <div class="page-header">
@@ -1965,13 +1998,29 @@ function renderTSCaptureSection(container) {
   container.querySelector('#btn-new-time-study')?.addEventListener('click', openNewTimeStudyModal);
 }
 
+function tsBadgeForStatus(status) {
+  const map = {
+    draft:       ['badge--neutral', 'Borrador'],
+    in_progress: ['badge--warning', 'En progreso'],
+    completed:   ['badge--success', 'Completado']
+  };
+  const [cls, label] = map[status] || ['badge--neutral', status || 'Borrador'];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function tsProgressOf(study) {
+  const steps = study.steps || [];
+  const total = steps.reduce((sum, s) => sum + (s.requiredCaptures || 0), 0);
+  const done  = steps.reduce((sum, s) => sum + (s.captures || []).length, 0);
+  return { done, total };
+}
+
 function renderTSRecordsSection(container) {
   const studies = state.timeStudies || [];
 
   if (studies.length === 0) {
     container.innerHTML = `
       <div class="ts-empty-state">
-        <div class="ts-empty-state-icon">[ ]</div>
         <div class="ts-empty-state-title">Aún no hay estudios de tiempo guardados.</div>
         <div class="ts-empty-state-body">Crea tu primer estudio desde la pestaña <strong>Toma de tiempos</strong>.</div>
       </div>
@@ -1979,28 +2028,44 @@ function renderTSRecordsSection(container) {
     return;
   }
 
-  const rows = studies.map(s => `
-    <tr>
-      <td>${esc(s.name)}</td>
-      <td>${s.steps ? s.steps.length : 0}</td>
-      <td><span class="badge badge--neutral">${esc(s.status || 'borrador')}</span></td>
-      <td style="color:var(--text-muted);font-size:var(--font-13)">${s.createdAt ? new Date(s.createdAt).toLocaleDateString('es-MX') : '—'}</td>
-    </tr>
-  `).join('');
+  const rows = studies.map(s => {
+    const { done, total } = tsProgressOf(s);
+    const date = s.updatedAt || s.createdAt;
+    return `
+      <tr>
+        <td><strong>${esc(s.name)}</strong></td>
+        <td style="color:var(--text-muted);font-size:var(--font-13)">${date ? new Date(date).toLocaleDateString('es-MX') : '—'}</td>
+        <td class="text-right">${(s.steps || []).length}</td>
+        <td>${tsBadgeForStatus(s.status)}</td>
+        <td class="font-mono" style="font-size:var(--font-13)">${done}/${total}</td>
+        <td>
+          <div class="ts-row-actions">
+            <button class="btn btn--ghost btn--sm" data-ts-action="view"      data-study-id="${esc(s.id)}" title="Ver detalle">Ver</button>
+            <button class="btn btn--ghost btn--sm" data-ts-action="edit"      data-study-id="${esc(s.id)}" title="Editar">Editar</button>
+            <button class="btn btn--ghost btn--sm" data-ts-action="duplicate" data-study-id="${esc(s.id)}" title="Duplicar">Duplicar</button>
+            <button class="btn btn--ghost btn--sm ts-btn-danger" data-ts-action="delete" data-study-id="${esc(s.id)}" title="Eliminar">Eliminar</button>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
 
   container.innerHTML = `
     <div class="card">
       <div class="card-header">
         <div class="card-title">Estudios guardados</div>
+        <span class="badge badge--neutral">${studies.length}</span>
       </div>
       <div style="overflow-x:auto">
         <table class="time-study-table">
           <thead>
             <tr>
               <th>Nombre</th>
-              <th style="width:80px">Pasos</th>
+              <th style="width:110px">Actualizado</th>
+              <th class="text-right" style="width:66px">Pasos</th>
               <th style="width:120px">Estado</th>
-              <th style="width:140px">Fecha</th>
+              <th style="width:88px">Progreso</th>
+              <th style="width:240px">Acciones</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -2008,6 +2073,17 @@ function renderTSRecordsSection(container) {
       </div>
     </div>
   `;
+
+  container.querySelectorAll('[data-ts-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id     = btn.dataset.studyId;
+      const action = btn.dataset.tsAction;
+      if (action === 'view')      openTimeStudyDetailModal(id);
+      else if (action === 'edit') openEditTimeStudyModal(id, () => renderTSRecordsSection(container));
+      else if (action === 'duplicate') { tsDuplicateStudy(id); renderTSRecordsSection(container); }
+      else if (action === 'delete')    tsDeleteStudy(id, container);
+    });
+  });
 }
 
 function openNewTimeStudyModal() {
@@ -2107,17 +2183,20 @@ function openNewTimeStudyModal() {
     const stepBadCaptures = steps.find(s => s.captures < 1);
     if (stepBadCaptures) { showToast('Cada paso debe tener al menos 1 captura', 'warning'); return; }
 
+    const now = new Date().toISOString();
     const study = {
       id: generateId('TST'),
       name,
-      createdAt: new Date().toISOString(),
-      status: 'borrador',
+      status: 'draft',
+      createdAt: now,
+      updatedAt: now,
       steps: steps.map(s => ({
         id: s.id,
         name: s.name.trim(),
-        captures: s.captures,
-        times: [],
-        average: null
+        requiredCaptures: s.captures,
+        captures: [],
+        averageTime: null,
+        isComplete: false
       }))
     };
 
@@ -2129,6 +2208,227 @@ function openNewTimeStudyModal() {
     showToast(`Estudio "${name}" creado`, 'success');
     renderPage('timeStudy');
   });
+}
+
+function openTimeStudyDetailModal(studyId) {
+  const study = (state.timeStudies || []).find(s => s.id === studyId);
+  if (!study) return;
+
+  const stepRows = (study.steps || []).map((step, i) => {
+    const taken    = (step.captures || []).length;
+    const needed   = step.requiredCaptures || 0;
+    const complete = step.isComplete || taken >= needed;
+    const avg      = step.averageTime != null ? `${fmt(step.averageTime, 2)}s` : '—';
+    return `
+      <tr>
+        <td class="font-mono" style="color:var(--text-muted)">${i + 1}</td>
+        <td>${esc(step.name)}</td>
+        <td class="text-right">${needed}</td>
+        <td class="text-right">${taken}</td>
+        <td class="text-right font-mono">${avg}</td>
+        <td>${complete
+          ? '<span class="badge badge--success">Completo</span>'
+          : '<span class="badge badge--neutral">Pendiente</span>'}</td>
+        <td>
+          <button class="btn btn--ghost btn--sm" disabled
+            title="Cronómetro disponible en la siguiente fase">Continuar captura</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  const { done, total } = tsProgressOf(study);
+
+  openModal(esc(study.name), `
+    <div style="display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap;margin-bottom:var(--sp-4)">
+      ${tsBadgeForStatus(study.status)}
+      <span style="color:var(--text-muted);font-size:var(--font-13)">${(study.steps || []).length} pasos</span>
+      <span style="color:var(--text-muted);font-size:var(--font-13)">Progreso: ${done}/${total}</span>
+      <span style="color:var(--text-muted);font-size:var(--font-13)">Creado: ${study.createdAt ? new Date(study.createdAt).toLocaleDateString('es-MX') : '—'}</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="time-study-table">
+        <thead>
+          <tr>
+            <th style="width:40px">No.</th>
+            <th>Paso</th>
+            <th class="text-right" style="width:90px">Requeridas</th>
+            <th class="text-right" style="width:80px">Tomadas</th>
+            <th class="text-right" style="width:90px">Promedio</th>
+            <th style="width:100px">Estado</th>
+            <th style="width:150px"></th>
+          </tr>
+        </thead>
+        <tbody>${stepRows || '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Sin pasos</td></tr>'}</tbody>
+      </table>
+    </div>
+    <div class="modal-actions" style="margin-top:var(--sp-5)">
+      <button class="btn btn--ghost" id="tsd-close">Cerrar</button>
+    </div>
+  `);
+
+  document.getElementById('tsd-close')?.addEventListener('click', closeModal);
+}
+
+function openEditTimeStudyModal(studyId, onSave) {
+  const study = (state.timeStudies || []).find(s => s.id === studyId);
+  if (!study) return;
+
+  let steps = (study.steps || []).map(s => ({
+    id: s.id,
+    name: s.name,
+    captures: s.requiredCaptures || 1,
+    takenCount: (s.captures || []).length
+  }));
+
+  function buildStepsHTML() {
+    return steps.map((step, i) => {
+      const minVal = step.takenCount > 0 ? step.takenCount : 1;
+      return `
+        <div class="ts-step-row" data-step-idx="${i}">
+          <span class="ts-step-num">${i + 1}</span>
+          <input class="form-input ts-step-name" type="text" placeholder="Nombre del paso"
+            value="${esc(step.name)}" data-step-idx="${i}" />
+          <input class="form-input ts-step-captures" type="number" min="${minVal}" step="1"
+            value="${step.captures}" data-step-idx="${i}" style="width:80px;text-align:right"
+            ${step.takenCount > 0 ? `title="Mínimo ${step.takenCount} (capturas ya tomadas)"` : ''} />
+          <button class="btn btn--ghost btn--sm ts-step-remove" data-step-idx="${i}"
+            ${steps.length === 1 ? 'disabled' : ''} title="Eliminar paso">&times;</button>
+          <button class="btn btn--ghost btn--sm" disabled
+            title="Disponible en la siguiente fase">Cronómetro</button>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function refreshStepsList() {
+    const list = document.getElementById('tsc-steps-list');
+    if (!list) return;
+    list.innerHTML = buildStepsHTML();
+
+    list.querySelectorAll('.ts-step-name').forEach(input => {
+      input.addEventListener('input', () => { steps[parseInt(input.dataset.stepIdx)].name = input.value; });
+    });
+
+    list.querySelectorAll('.ts-step-captures').forEach(input => {
+      input.addEventListener('change', () => {
+        const idx  = parseInt(input.dataset.stepIdx);
+        const minV = steps[idx].takenCount > 0 ? steps[idx].takenCount : 1;
+        const val  = Math.max(minV, parseInt(input.value) || minV);
+        steps[idx].captures = val;
+        input.value = val;
+      });
+    });
+
+    list.querySelectorAll('.ts-step-remove').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.stepIdx);
+        if (steps.length > 1) { steps.splice(idx, 1); refreshStepsList(); }
+      });
+    });
+  }
+
+  openModal('Editar estudio', `
+    <div class="ts-creator-form">
+      <div class="form-group">
+        <label class="form-label" for="tsc-name">Nombre del estudio <span style="color:var(--danger)">*</span></label>
+        <input class="form-input w-full" id="tsc-name" type="text" value="${esc(study.name)}" />
+      </div>
+      <div class="form-group">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--sp-2)">
+          <label class="form-label" style="margin:0">Pasos / Operaciones <span style="color:var(--danger)">*</span></label>
+          <button class="btn btn--ghost btn--sm" id="tsc-add-step">+ Agregar paso</button>
+        </div>
+        <div class="ts-step-header">
+          <span></span><span>Nombre del paso</span>
+          <span style="text-align:right">Capturas</span><span></span><span></span>
+        </div>
+        <div id="tsc-steps-list"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn--ghost" id="tsc-cancel">Cancelar</button>
+        <button class="btn btn--primary" id="tsc-save">Guardar cambios</button>
+      </div>
+    </div>
+  `);
+
+  refreshStepsList();
+
+  document.getElementById('tsc-cancel')?.addEventListener('click', closeModal);
+
+  document.getElementById('tsc-add-step')?.addEventListener('click', () => {
+    steps.push({ id: generateId('STP'), name: '', captures: 3, takenCount: 0 });
+    refreshStepsList();
+  });
+
+  document.getElementById('tsc-save')?.addEventListener('click', () => {
+    const name = document.getElementById('tsc-name')?.value.trim() || '';
+    if (!name)                              { showToast('El nombre del estudio es requerido', 'warning'); return; }
+    if (steps.length === 0)                 { showToast('Agrega al menos un paso', 'warning'); return; }
+    if (steps.find(s => !s.name.trim()))    { showToast('Todos los pasos deben tener nombre', 'warning'); return; }
+    if (steps.find(s => s.captures < 1))   { showToast('Cada paso debe tener al menos 1 captura', 'warning'); return; }
+
+    const existing = (state.timeStudies || []).find(s => s.id === studyId);
+    if (!existing) return;
+
+    existing.name      = name;
+    existing.updatedAt = new Date().toISOString();
+    existing.steps = steps.map(s => {
+      const prev = (existing.steps || []).find(p => p.id === s.id);
+      return {
+        id: s.id,
+        name: s.name.trim(),
+        requiredCaptures: s.captures,
+        captures:    prev ? (prev.captures    || [])   : [],
+        averageTime: prev ? (prev.averageTime || null) : null,
+        isComplete:  prev ? (prev.isComplete  || false): false
+      };
+    });
+
+    if (onSave) onSave();
+    closeModal();
+    showToast(`Estudio "${name}" actualizado`, 'success');
+  });
+}
+
+function tsDuplicateStudy(studyId) {
+  const original = (state.timeStudies || []).find(s => s.id === studyId);
+  if (!original) return;
+  const now  = new Date().toISOString();
+  const copy = {
+    id:        generateId('TST'),
+    name:      `${original.name} (Copia)`,
+    status:    'draft',
+    createdAt: now,
+    updatedAt: now,
+    steps: (original.steps || []).map(step => ({
+      id:               generateId('STP'),
+      name:             step.name,
+      requiredCaptures: step.requiredCaptures,
+      captures:         [],
+      averageTime:      null,
+      isComplete:       false
+    }))
+  };
+  if (!Array.isArray(state.timeStudies)) state.timeStudies = [];
+  state.timeStudies.push(copy);
+  saveState();
+  showToast(`Estudio duplicado como "${copy.name}"`, 'success');
+}
+
+function tsDeleteStudy(studyId, container) {
+  const study = (state.timeStudies || []).find(s => s.id === studyId);
+  if (!study) return;
+  showConfirm(
+    'Eliminar estudio',
+    `¿Eliminar "${study.name}"? Esta acción no se puede deshacer.`,
+    () => {
+      state.timeStudies = (state.timeStudies || []).filter(s => s.id !== studyId);
+      saveState();
+      showToast('Estudio eliminado', 'success');
+      renderTSRecordsSection(container);
+    }
+  );
 }
 
 function renderTSFrequencySection(container) {
