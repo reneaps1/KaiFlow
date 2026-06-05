@@ -17,6 +17,12 @@ let _catalogDraft = null;
 let _catalogDraftKey = null;
 let _catalogCreatedInitial = false;
 let _catalogOpenStationIds = new Set();
+let _balanceSimulationDraft = null;
+let _balanceSimulationKey = null;
+let _balanceOpenStationIds = new Set();
+let _yamazumiSimulationDraft = null;
+let _yamazumiSimulationKey = null;
+let _yamazumiSelectedStationId = null;
 let _activeUser = null;
 
 // Stopwatch runtime state (not persisted)
@@ -64,8 +70,11 @@ const DASHBOARD_DEFAULT_SHIFT = 'Turno 1';
 const DASHBOARD_DEFAULT_EFFICIENCY = 99;
 const DASHBOARD_DEFAULT_GRAPH_BY = 'station';
 const DASHBOARD_CONFIG_STORAGE_KEY = 'dashboardConfigByLine';
+const BALANCE_CHART_CONFIG_STORAGE_KEY = 'balanceChartConfigByLine';
 const CATALOG_DATA_STORAGE_KEY = 'catalogDataByLine';
 const CATALOG_PLANT_NAME = 'Fujikura Puebla';
+const SIMULA_IMPORT_AREA = 'Motor';
+const SIMULA_IMPORT_LINE = 'SUB GTI';
 const ACTIVE_USER_STORAGE_KEY = 'kaiflowActiveUser';
 const CHANGE_DATABASE_STORAGE_KEY = 'changeDatabaseLog';
 const STANDARD_TIMES_STORAGE_KEY = 'standardTimesData';
@@ -425,7 +434,7 @@ function dashboardLineKey(area, line) {
 }
 
 function catalogLineKey(area, line) {
-  return `${area}::${line}`;
+  return `${String(area ?? '').trim()}::${String(line ?? '').trim()}`;
 }
 
 function readCatalogStore() {
@@ -475,7 +484,8 @@ function normalizeCatalogActivity(activity, index) {
     id: activity.id || generateId('CAT-ACT'),
     no: index + 1,
     actividad: activity.actividad ?? activity.name ?? activity.nombre ?? '',
-    tiempo: activity.tiempo ?? activity.time ?? activity.standardTime ?? ''
+    tiempo: activity.tiempo ?? activity.time ?? activity.standardTime ?? '',
+    valor: normalizeSimulaValor(activity.valor ?? activity.value ?? activity.tipoValor)
   };
 }
 
@@ -637,6 +647,28 @@ function fmtCatalogSeconds(value) {
   return fmt(Math.round(catalogSeconds(value) * 100) / 100, 2);
 }
 
+function cleanSimulaText(value) {
+  return String(value ?? '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeSimulaValor(value) {
+  const normalized = cleanSimulaText(value).toUpperCase();
+  if (normalized === 'AGREGA VALOR') return 'AGREGA VALOR';
+  if (normalized === 'NO AGREGA VALOR') return 'NO AGREGA VALOR';
+  if (normalized === 'NECESARIO') return 'NECESARIO';
+  return 'NECESARIO';
+}
+
+function parseSimulaTime(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  const normalized = cleanSimulaText(value).replace(',', '.');
+  const parsed = parseFloat(normalized.replace(/[^0-9.-]/g, ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function recalcCatalogActivityNumbers(operator) {
   operator.actividades = (operator.actividades || []).map((activity, index) => ({
     ...activity,
@@ -652,12 +684,196 @@ function normalizeCatalogDraftForSave(catalog) {
         id: activity.id || generateId('CAT-ACT'),
         no: index + 1,
         actividad: activity.actividad || '',
-        tiempo: catalogSeconds(activity.tiempo)
+        tiempo: catalogSeconds(activity.tiempo),
+        valor: normalizeSimulaValor(activity.valor)
       }));
       operator.subconjunto = operator.subconjunto || '';
     });
   });
   return normalized;
+}
+
+function isSimulaStationLabel(value) {
+  const text = cleanSimulaText(value).toUpperCase();
+  return /^ESTACI[OÓ]N\s+(?:MOTOR\s+)?\d+(?:\s+MOTOR)?$/.test(text);
+}
+
+function parseSimulaOperatorName(value) {
+  const match = cleanSimulaText(value).match(/actividad(?:es)?\s+OP\s*(\d+)/i);
+  return match ? `OP${Number(match[1])}` : '';
+}
+
+function rowCell(row, index) {
+  return row && row[index] != null ? row[index] : '';
+}
+
+function isSimulaActivityHeaderRow(row) {
+  const colB = cleanSimulaText(rowCell(row, 1)).toUpperCase();
+  const colC = cleanSimulaText(rowCell(row, 2)).toUpperCase();
+  return ['TIEMPO', 'STD'].includes(colB) || colC === 'VALOR';
+}
+
+function buildSimulaCatalogFromRows(rows) {
+  const catalog = {
+    planta: CATALOG_PLANT_NAME,
+    area: SIMULA_IMPORT_AREA,
+    linea: SIMULA_IMPORT_LINE,
+    estaciones: []
+  };
+  let currentStation = null;
+  let currentOperator = null;
+  let pendingSubconjunto = '';
+
+  rows.forEach(row => {
+    const colA = cleanSimulaText(rowCell(row, 0));
+    if (!colA) return;
+
+    if (isSimulaStationLabel(colA)) {
+      currentStation = {
+        id: generateId('SIM-ST'),
+        nombre: colA,
+        operadores: []
+      };
+      catalog.estaciones.push(currentStation);
+      currentOperator = null;
+      pendingSubconjunto = cleanSimulaText(rowCell(row, 3)).toLowerCase() === 'subconjunto'
+        ? cleanSimulaText(rowCell(row, 4))
+        : '';
+      return;
+    }
+
+    const operatorName = parseSimulaOperatorName(colA);
+    if (operatorName) {
+      if (!currentStation) {
+        currentStation = {
+          id: generateId('SIM-ST'),
+          nombre: 'ESTACION MOTOR 1',
+          operadores: []
+        };
+        catalog.estaciones.push(currentStation);
+      }
+
+      currentOperator = {
+        id: generateId('SIM-OP'),
+        nombre: operatorName,
+        subconjunto: cleanSimulaText(rowCell(row, 4)) || pendingSubconjunto,
+        actividades: []
+      };
+      currentStation.operadores.push(currentOperator);
+      pendingSubconjunto = '';
+      return;
+    }
+
+    if (!currentOperator || isSimulaActivityHeaderRow(row)) return;
+
+    currentOperator.actividades.push({
+      id: generateId('SIM-ACT'),
+      no: currentOperator.actividades.length + 1,
+      actividad: colA,
+      tiempo: parseSimulaTime(rowCell(row, 1)),
+      valor: normalizeSimulaValor(rowCell(row, 2))
+    });
+  });
+
+  catalog.estaciones.forEach(station => {
+    station.operadores.forEach(operator => recalcCatalogActivityNumbers(operator));
+  });
+
+  return normalizeCatalogForLine(catalog, SIMULA_IMPORT_AREA, SIMULA_IMPORT_LINE);
+}
+
+function validateSimulaCatalog(catalog) {
+  const validValues = new Set(['AGREGA VALOR', 'NO AGREGA VALOR', 'NECESARIO']);
+  if (!catalog || catalog.area !== SIMULA_IMPORT_AREA || catalog.linea !== SIMULA_IMPORT_LINE) return false;
+  if (!Array.isArray(catalog.estaciones) || catalog.estaciones.length === 0) return false;
+
+  return catalog.estaciones.every(station =>
+    station &&
+    Array.isArray(station.operadores) &&
+    station.operadores.every(operator =>
+      operator &&
+      Array.isArray(operator.actividades) &&
+      operator.actividades.every(activity =>
+        activity &&
+        String(activity.actividad || '').trim() &&
+        typeof activity.tiempo === 'number' &&
+        Number.isFinite(activity.tiempo) &&
+        validValues.has(activity.valor)
+      )
+    )
+  );
+}
+
+function parseSimulaWorkbook(workbook) {
+  const sheet = workbook.Sheets.Hoja3 || workbook.Sheets.hoja3 || workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) throw new Error('No se encontró la hoja Hoja3.');
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', raw: true });
+  const catalog = buildSimulaCatalogFromRows(rows);
+  if (!catalog.estaciones.length) throw new Error('No se detectaron estaciones en Hoja3.');
+  if (!catalog.estaciones.some(station => station.operadores.length)) {
+    throw new Error('No se detectaron operadores en Hoja3.');
+  }
+  return catalog;
+}
+
+async function readSimulaFile(file) {
+  if (!window.XLSX) {
+    throw new Error('No se pudo cargar el lector XLSX. Revisa la conexión e intenta de nuevo.');
+  }
+  const buffer = await file.arrayBuffer();
+  const workbook = XLSX.read(buffer, { type: 'array' });
+  return parseSimulaWorkbook(workbook);
+}
+
+function saveImportedSimulaCatalog(catalog, container) {
+  const key = catalogLineKey(SIMULA_IMPORT_AREA, SIMULA_IMPORT_LINE);
+  const store = readCatalogStore();
+  const normalized = normalizeCatalogForLine(catalog, SIMULA_IMPORT_AREA, SIMULA_IMPORT_LINE);
+  normalized.area = SIMULA_IMPORT_AREA;
+  normalized.linea = SIMULA_IMPORT_LINE;
+
+  if (!validateSimulaCatalog(normalized)) {
+    showToast('El archivo se leyó, pero la estructura importada no es válida.', 'warning');
+    return;
+  }
+
+  store[key] = normalized;
+  writeCatalogStore(store);
+
+  const savedCatalog = readCatalogStore()[key];
+  if (!validateSimulaCatalog(savedCatalog)) {
+    showToast('No se pudo confirmar el guardado en Motor::SUB GTI.', 'warning');
+    return;
+  }
+
+  state.dashboardSelection = { area: SIMULA_IMPORT_AREA, line: SIMULA_IMPORT_LINE };
+  saveState();
+  resetCatalogEditorDraft();
+  showToast('Datos importados correctamente para Motor / SUB GTI. Selecciona Motor / SUB GTI en Dashboard para visualizarlos.', 'success');
+  renderPage(state.currentPage || 'catalogs');
+}
+
+async function handleSimulaImportFile(container, file) {
+  if (!file) return;
+  try {
+    const catalog = await readSimulaFile(file);
+    const store = readCatalogStore();
+    const key = catalogLineKey(SIMULA_IMPORT_AREA, SIMULA_IMPORT_LINE);
+    const doImport = () => saveImportedSimulaCatalog(catalog, container);
+
+    if (store[key]) {
+      showConfirm(
+        'Reemplazar Motor / SUB GTI',
+        'Ya existe información para Motor / SUB GTI. ¿Deseas reemplazarla con los datos importados?',
+        doImport
+      );
+      return;
+    }
+
+    doImport();
+  } catch (error) {
+    showToast(error?.message || 'No se pudo importar el archivo SIMULA.xlsx.', 'warning');
+  }
 }
 
 function findCatalogStation(stationId) {
@@ -715,7 +931,9 @@ function getDefaultDashboardConfig(area = DASHBOARD_DEFAULT_AREA, line = DASHBOA
     turno: DASHBOARD_DEFAULT_SHIFT,
     piezasPorHora: 0,
     eficienciaPorcentaje: DASHBOARD_DEFAULT_EFFICIENCY,
-    graficoPor: DASHBOARD_DEFAULT_GRAPH_BY
+    graficoPor: DASHBOARD_DEFAULT_GRAPH_BY,
+    usarTiempoCicloManual: false,
+    tiempoCicloManual: null
   };
 }
 
@@ -736,6 +954,12 @@ function normalizeDashboardConfig(config, area = DASHBOARD_DEFAULT_AREA, line = 
   const graficoPor = ['station', 'operator', 'subconjunto'].includes(config?.graficoPor || config?.graphBy)
     ? (config?.graficoPor || config?.graphBy)
     : DASHBOARD_DEFAULT_GRAPH_BY;
+  const rawManualCycle = Number(config?.tiempoCicloManual ?? config?.manualCycleTime);
+  const tiempoCicloManual = Number.isFinite(rawManualCycle) && rawManualCycle >= 0
+    ? rawManualCycle
+    : null;
+  const usarTiempoCicloManual = Boolean(config?.usarTiempoCicloManual || config?.useManualCycleTime) &&
+    tiempoCicloManual !== null;
 
   return {
     area,
@@ -743,7 +967,9 @@ function normalizeDashboardConfig(config, area = DASHBOARD_DEFAULT_AREA, line = 
     turno,
     piezasPorHora,
     eficienciaPorcentaje,
-    graficoPor
+    graficoPor,
+    usarTiempoCicloManual,
+    tiempoCicloManual
   };
 }
 
@@ -786,7 +1012,9 @@ function ensureDashboardState() {
         turno: normalized.turno,
         piezasPorHora: normalized.piezasPorHora,
         eficienciaPorcentaje: normalized.eficienciaPorcentaje,
-        graficoPor: normalized.graficoPor
+        graficoPor: normalized.graficoPor,
+        usarTiempoCicloManual: normalized.usarTiempoCicloManual,
+        tiempoCicloManual: normalized.tiempoCicloManual
       };
     });
     if (Object.keys(migratedStore).length > 0) writeDashboardConfigStore(migratedStore);
@@ -800,6 +1028,42 @@ function getDashboardLineConfig(area, line) {
   const store = readDashboardConfigStore();
   const saved = store[dashboardLineKey(area, line)];
   return saved ? normalizeDashboardConfig(saved, area, line) : getDefaultDashboardConfig(area, line);
+}
+
+function normalizeGraphBy(value) {
+  return ['station', 'operator', 'subconjunto'].includes(value)
+    ? value
+    : DASHBOARD_DEFAULT_GRAPH_BY;
+}
+
+function readBalanceChartConfigStore() {
+  try {
+    const raw = localStorage.getItem(BALANCE_CHART_CONFIG_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeBalanceChartConfigStore(store) {
+  localStorage.setItem(BALANCE_CHART_CONFIG_STORAGE_KEY, JSON.stringify(store || {}));
+}
+
+function getBalanceChartConfig(area, line) {
+  const key = catalogLineKey(area, line);
+  const saved = readBalanceChartConfigStore()[key];
+  return {
+    graficoPor: normalizeGraphBy(saved?.graficoPor)
+  };
+}
+
+function saveBalanceChartConfig(area, line, config) {
+  const store = readBalanceChartConfigStore();
+  store[catalogLineKey(area, line)] = {
+    graficoPor: normalizeGraphBy(config?.graficoPor)
+  };
+  writeBalanceChartConfigStore(store);
 }
 
 function getDashboardDraftConfig(area, line) {
@@ -831,7 +1095,9 @@ function saveDashboardLineConfig(config) {
     turno: normalized.turno,
     piezasPorHora: normalized.piezasPorHora,
     eficienciaPorcentaje: normalized.eficienciaPorcentaje,
-    graficoPor: normalized.graficoPor
+    graficoPor: normalized.graficoPor,
+    usarTiempoCicloManual: normalized.usarTiempoCicloManual,
+    tiempoCicloManual: normalized.tiempoCicloManual
   };
   writeDashboardConfigStore(store);
   clearDashboardDraftConfig(normalized.area, normalized.linea);
@@ -966,6 +1232,9 @@ function getCatalogLineSummary(area, line) {
     };
   });
 
+  const config = getDashboardLineConfig(context.area, context.line);
+  const effectiveLineTotal = getEffectiveCycleTime(config, lineTotal);
+
   return {
     catalog,
     planta: context.planta,
@@ -974,7 +1243,9 @@ function getCatalogLineSummary(area, line) {
     linea: context.line,
     hasCatalog: !!catalog,
     hasOperationalData: !!catalog && totalOperators > 0 && totalActivities > 0,
-    totalTiempo: lineTotal,
+    totalTiempo: effectiveLineTotal,
+    tiempoCicloCalculado: lineTotal,
+    usarTiempoCicloManual: Boolean(config.usarTiempoCicloManual),
     totalStations: stationLoads.length,
     totalOperators,
     totalActivities,
@@ -998,13 +1269,21 @@ function getSubconjuntoLoadsFromCatalog(area, line) {
   return getCatalogLineSummary(area, line).subconjuntoLoads;
 }
 
+function getEffectiveCycleTime(config, calculatedCycleTime) {
+  const manualTime = Number(config?.tiempoCicloManual);
+  return config?.usarTiempoCicloManual && Number.isFinite(manualTime) && manualTime >= 0
+    ? manualTime
+    : calculatedCycleTime;
+}
+
 function computeDashboardMetrics(config, catalog) {
   const shift = DASHBOARD_SHIFT_CONFIG[config.turno] || DASHBOARD_SHIFT_CONFIG[DASHBOARD_DEFAULT_SHIFT];
   const piezasPorHora = Math.max(0, Number(config.piezasPorHora) || 0);
   const eficienciaPorcentaje = Math.max(0, Number(config.eficienciaPorcentaje) || 0);
   const eficienciaDecimal = eficienciaPorcentaje / 100;
   const availableSeconds = shift.seconds;
-  const tiempoCicloTotal = calculateCatalogLineTotal(catalog);
+  const tiempoCicloCalculado = calculateCatalogLineTotal(catalog);
+  const tiempoCicloTotal = getEffectiveCycleTime(config, tiempoCicloCalculado);
   const stationRows = getDashboardStationRows(catalog);
   const operatorRows = getDashboardOperatorRows(catalog);
   const subsetRows = getDashboardSubsetRows(catalog);
@@ -1026,6 +1305,8 @@ function computeDashboardMetrics(config, catalog) {
     availableSeconds,
     takt,
     tiempoCicloTotal,
+    tiempoCicloCalculado,
+    usarTiempoCicloManual: Boolean(config.usarTiempoCicloManual),
     operatorCount,
     bottleneck,
     capacity,
@@ -1190,8 +1471,17 @@ function renderPage(page) {
     permissions:   renderPermissions
   };
   const fn = renderers[page];
-  if (fn) fn(main);
-  else main.innerHTML = renderPlaceholder(PAGE_LABELS[page] || page, 'Este módulo está en construcción.');
+  try {
+    if (fn) fn(main);
+    else main.innerHTML = renderPlaceholder(PAGE_LABELS[page] || page, 'Este módulo está en construcción.');
+  } catch (error) {
+    console.error(`Error al renderizar ${page}:`, error);
+    main.innerHTML = `
+      <div class="dashboard-chart-empty">
+        <strong>No se pudo cargar este módulo.</strong>
+        <span>${esc(error?.message || 'Error inesperado de renderizado.')}</span>
+      </div>`;
+  }
   main.scrollTop = 0;
 }
 
@@ -1311,6 +1601,9 @@ function renderDashboard(container) {
   const shiftOptions = Object.keys(DASHBOARD_SHIFT_CONFIG).map(name =>
     `<option value="${esc(name)}"${name === config.turno ? ' selected' : ''}>${esc(name)}</option>`
   ).join('');
+  const catalogForConfig = getDashboardCatalog(area, line);
+  const calculatedCycleTime = calculateCatalogLineTotal(catalogForConfig);
+  const effectiveCycleTime = getEffectiveCycleTime(config, calculatedCycleTime);
 
   container.innerHTML = `
     <div class="page-header">
@@ -1358,6 +1651,15 @@ function renderDashboard(container) {
               <option value="subconjunto"${config.graficoPor === 'subconjunto' ? ' selected' : ''}>Subconjunto</option>
             </select>
           </div>
+          <div class="form-group dashboard-cycle-control">
+            <label class="form-label" for="dashboard-cycle-time">Tiempo ciclo total</label>
+            <div class="cycle-time-input-row">
+              <input class="form-input" id="dashboard-cycle-time" type="number" min="0" step="0.01" value="${fmt(effectiveCycleTime, 2)}" data-manual="${config.usarTiempoCicloManual ? 'true' : 'false'}" />
+              <span class="cycle-time-unit">s</span>
+            </div>
+            <span class="form-hint">Editable temporalmente para pruebas</span>
+            <button class="btn btn--ghost btn--sm" id="dashboard-cycle-reset" type="button" ${config.usarTiempoCicloManual ? '' : 'disabled'}>Restaurar cálculo automático</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1381,6 +1683,8 @@ function renderDashboard(container) {
   const piecesEl = container.querySelector('#dashboard-pieces-hour');
   const efficiencyEl = container.querySelector('#dashboard-efficiency');
   const graphByEl = container.querySelector('#dashboard-graph-by');
+  const cycleTimeEl = container.querySelector('#dashboard-cycle-time');
+  const cycleResetEl = container.querySelector('#dashboard-cycle-reset');
   const metricsEl = container.querySelector('#dashboard-metrics');
   const chartEl = container.querySelector('#dashboard-chart-wrap');
   const chartTitleEl = container.querySelector('#dashboard-chart-title');
@@ -1393,7 +1697,11 @@ function renderDashboard(container) {
     turno: shiftEl.value,
     piezasPorHora: Math.max(0, parseFloat(piecesEl.value) || 0),
     eficienciaPorcentaje: Math.max(0, parseFloat(efficiencyEl.value) || 0),
-    graficoPor: graphByEl.value
+    graficoPor: graphByEl.value,
+    usarTiempoCicloManual: cycleTimeEl.dataset.manual === 'true',
+    tiempoCicloManual: cycleTimeEl.dataset.manual === 'true'
+      ? Math.max(0, parseFloat(cycleTimeEl.value) || 0)
+      : null
   });
 
   const persistDashboardDraft = () => {
@@ -1442,6 +1750,18 @@ function renderDashboard(container) {
 
   [shiftEl, graphByEl].forEach(input => input.addEventListener('change', refreshDashboard));
   [piecesEl, efficiencyEl].forEach(input => input.addEventListener('input', refreshDashboard));
+  cycleTimeEl.addEventListener('input', () => {
+    cycleTimeEl.dataset.manual = 'true';
+    cycleResetEl.disabled = false;
+    refreshDashboard();
+  });
+  cycleResetEl.addEventListener('click', () => {
+    const catalog = getDashboardCatalog(areaEl.value, lineEl.value);
+    cycleTimeEl.value = fmt(calculateCatalogLineTotal(catalog), 2);
+    cycleTimeEl.dataset.manual = 'false';
+    cycleResetEl.disabled = true;
+    refreshDashboard();
+  });
 
   container.querySelector('#dashboard-save').addEventListener('click', () => {
     const draft = readDraft();
@@ -1746,7 +2066,11 @@ function renderCatalogs(container) {
         <h1 class="page-title">Catálogo</h1>
         <p class="page-subtitle">Estructura de estaciones, operadores y actividades por línea</p>
       </div>
-      <button class="btn btn--primary" type="button" data-catalog-action="save-catalog">Guardar cambios</button>
+      <div class="btn-group">
+        <button class="btn btn--secondary" type="button" data-catalog-action="import-simula">Importar archivo</button>
+        <input id="catalog-import-simula" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+        <button class="btn btn--primary" type="button" data-catalog-action="save-catalog">Guardar cambios</button>
+      </div>
     </div>
 
     <div class="entity-grid mb-6">
@@ -2054,6 +2378,10 @@ function bindCatalogEditor(container) {
     const operatorId = button.dataset.operatorId;
     const activityId = button.dataset.activityId;
 
+    if (action === 'import-simula') {
+      container.querySelector('#catalog-import-simula')?.click();
+      return;
+    }
     if (action === 'save-catalog') saveCatalogDraft(container);
     if (action === 'add-station') addCatalogStation(container);
     if (action === 'delete-station') deleteCatalogStation(container, stationId);
@@ -2077,6 +2405,12 @@ function bindCatalogEditor(container) {
         menu?.classList.add('hidden');
       }
     }, 0);
+  });
+
+  container.querySelector('#catalog-import-simula')?.addEventListener('change', event => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    handleSimulaImportFile(container, file);
   });
 }
 
@@ -3876,6 +4210,16 @@ function closeStopwatchModal() {
 function renderTSFrequencySection(container) {
   ensureTimeStudyStructure();
   const { station, subset } = getSelectedTimeStudyContext();
+
+  if (!station || !subset) {
+    container.innerHTML = `
+      <div class="dashboard-chart-empty">
+        <strong>No hay estructura de Estudios de Tiempo disponible.</strong>
+        <span>Cuando se carguen estaciones y subconjuntos para este módulo, el análisis de frecuencias aparecerá aquí.</span>
+      </div>`;
+    return;
+  }
+
   const stationTotal = calculateStationTimeStudyTotal(station);
   const subsetTotal = calculateSubsetTotal(subset);
   const totalAcrossSubsets = state.timeStudyStructure.reduce((sum, st) => sum + calculateStationTimeStudyTotal(st), 0);
@@ -4121,8 +4465,21 @@ function renderCatalogConnectionContextCards(summary) {
       </div>
       <div class="entity-card">
         <div class="entity-card-label">Tiempo ciclo total</div>
-        <div class="entity-card-name">${fmtCatalogSeconds(summary.totalTiempo)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
-        <div class="entity-card-meta">Suma de actividades guardadas</div>
+        <div class="cycle-time-input-row">
+          <input
+            class="form-input cycle-time-card-input"
+            data-cycle-time-control
+            type="number"
+            min="0"
+            step="0.01"
+            value="${fmt(summary.totalTiempo, 2)}"
+            data-manual="${summary.usarTiempoCicloManual ? 'true' : 'false'}"
+          />
+          <span class="cycle-time-unit">s</span>
+        </div>
+        <div class="entity-card-meta">Editable temporalmente para pruebas</div>
+        <div class="entity-card-meta">Automático: ${fmtCatalogSeconds(summary.tiempoCicloCalculado)} s</div>
+        <button class="btn btn--ghost btn--sm mt-2" data-cycle-time-reset type="button" ${summary.usarTiempoCicloManual ? '' : 'disabled'}>Restaurar cálculo automático</button>
       </div>
       <div class="entity-card">
         <div class="entity-card-label">Total estaciones</div>
@@ -4149,51 +4506,447 @@ function renderCatalogConnectionEmpty() {
     </div>`;
 }
 
-function renderBalanceOperatorRows(summary) {
-  return summary.stationLoads.flatMap(station => {
-    if (!station.operadores.length) {
+function updateCycleTimeOverride(area, line, value, useManual) {
+  const current = getDashboardLineConfig(area, line);
+  const next = {
+    ...current,
+    area,
+    linea: line,
+    usarTiempoCicloManual: useManual,
+    tiempoCicloManual: useManual ? Math.max(0, Number(value) || 0) : null
+  };
+  setDashboardDraftConfig(next);
+  saveDashboardLineConfig(next);
+}
+
+function bindCycleTimeOverrideControls(container, summary, renderAgain) {
+  const input = container.querySelector('[data-cycle-time-control]');
+  const reset = container.querySelector('[data-cycle-time-reset]');
+  if (!input) return;
+
+  input.addEventListener('input', () => {
+    input.dataset.manual = 'true';
+    if (reset) reset.disabled = false;
+  });
+
+  input.addEventListener('change', () => {
+    updateCycleTimeOverride(summary.area, summary.line, input.value, true);
+    renderAgain();
+  });
+
+  reset?.addEventListener('click', () => {
+    updateCycleTimeOverride(summary.area, summary.line, null, false);
+    renderAgain();
+  });
+}
+
+function getBalanceSimulationCatalog(area, line, forceReset = false) {
+  const key = catalogLineKey(area, line);
+  const realCatalog = getDashboardCatalog(area, line);
+  if (!realCatalog) {
+    if (_balanceSimulationKey === key) {
+      _balanceSimulationDraft = null;
+      _balanceSimulationKey = null;
+      _balanceOpenStationIds = new Set();
+    }
+    return null;
+  }
+
+  if (forceReset || !_balanceSimulationDraft || _balanceSimulationKey !== key) {
+    _balanceSimulationDraft = deepClone(realCatalog);
+    _balanceSimulationKey = key;
+    _balanceOpenStationIds = new Set();
+  }
+
+  return _balanceSimulationDraft;
+}
+
+function resetBalanceSimulation(area, line) {
+  return getBalanceSimulationCatalog(area, line, true);
+}
+
+function buildBalanceSimulationSummary(catalog, context) {
+  const operatorTotals = {};
+  const subsetTotals = {};
+  const uniqueOperators = new Set();
+  const uniqueSubsets = new Set();
+  let totalOperators = 0;
+  let totalActivities = 0;
+  let totalTiempo = 0;
+
+  const stationLoads = (catalog?.estaciones || []).map((station, stationIndex) => {
+    const stationName = String(station.nombre || '').trim() || `Estación ${stationIndex + 1}`;
+    let stationTotal = 0;
+    let stationActivities = 0;
+    const operadores = (station.operadores || []).map((operator, operatorIndex) => {
+      const operatorName = String(operator.nombre || '').trim() || `OP${operatorIndex + 1}`;
+      const subconjunto = String(operator.subconjunto || '').trim() || 'Sin subconjunto';
+      const actividades = (operator.actividades || []).map((activity, activityIndex) => {
+        const tiempo = catalogSeconds(activity.tiempo ?? activity.time ?? activity.standardTime);
+        return {
+          id: activity.id || `activity-${activityIndex + 1}`,
+          no: activity.no || activityIndex + 1,
+          actividad: String(activity.actividad || activity.name || activity.nombre || '').trim(),
+          tiempo,
+          valor: normalizeSimulaValor(activity.valor)
+        };
+      });
+      const operatorTime = actividades.reduce((sum, activity) => sum + activity.tiempo, 0);
+
+      totalOperators += 1;
+      totalActivities += actividades.length;
+      stationActivities += actividades.length;
+      stationTotal += operatorTime;
+      uniqueOperators.add(operatorName);
+      if (subconjunto !== 'Sin subconjunto') uniqueSubsets.add(subconjunto);
+      operatorTotals[operatorName] = (operatorTotals[operatorName] || 0) + operatorTime;
+      subsetTotals[subconjunto] = (subsetTotals[subconjunto] || 0) + operatorTime;
+
+      return {
+        id: operator.id || `operator-${operatorIndex + 1}`,
+        nombre: operatorName,
+        subconjunto,
+        actividades,
+        activityCount: actividades.length,
+        time: operatorTime
+      };
+    });
+    const subconjuntos = [...new Set(operadores.map(operator => operator.subconjunto).filter(Boolean))];
+    totalTiempo += stationTotal;
+
+    return {
+      id: station.id || `station-${stationIndex + 1}`,
+      nombre: stationName,
+      time: stationTotal,
+      total: stationTotal,
+      operadores,
+      operatorCount: operadores.length,
+      activityCount: stationActivities,
+      operadoresLabel: operadores.length
+        ? operadores.map(operator => operator.nombre).join(', ')
+        : 'Sin operadores',
+      subconjuntos,
+      subconjuntosLabel: subconjuntos.length
+        ? subconjuntos.join(', ')
+        : 'Sin subconjuntos'
+    };
+  });
+
+  return {
+    catalog,
+    planta: context.planta,
+    area: context.area,
+    line: context.line,
+    linea: context.line,
+    hasCatalog: !!catalog,
+    hasOperationalData: !!catalog && totalOperators > 0 && totalActivities > 0,
+    totalTiempo,
+    tiempoCicloCalculado: totalTiempo,
+    usarTiempoCicloManual: false,
+    totalStations: stationLoads.length,
+    totalOperators,
+    totalActivities,
+    totalOperatorsUnique: uniqueOperators.size,
+    totalSubsetsUnique: uniqueSubsets.size,
+    stationLoads,
+    operatorLoads: mapObjectTotalsToRows(operatorTotals),
+    subconjuntoLoads: mapObjectTotalsToRows(subsetTotals)
+  };
+}
+
+function getBalanceSimulationSummary(forceReset = false) {
+  const context = getSelectedDashboardContext();
+  const catalog = getBalanceSimulationCatalog(context.area, context.line, forceReset);
+  return buildBalanceSimulationSummary(catalog, context);
+}
+
+function renderBalanceContextCards(summary) {
+  return `
+    <div class="entity-grid balance-context-grid mb-6">
+      <div class="entity-card">
+        <div class="entity-card-label">Planta</div>
+        <div class="entity-card-name">${esc(summary.planta)}</div>
+        <div class="entity-card-meta">Contexto de Catálogo</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Área</div>
+        <div class="entity-card-name">${esc(summary.area)}</div>
+        <div class="entity-card-meta">Selección del Dashboard</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Línea</div>
+        <div class="entity-card-name">${esc(summary.linea)}</div>
+        <div class="entity-card-meta">Selección del Dashboard</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Tiempo ciclo total</div>
+        <div class="entity-card-name"><span data-balance-cycle-total>${fmtCatalogSeconds(summary.totalTiempo)}</span><span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
+        <div class="entity-card-meta">Simulación actual</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Total estaciones</div>
+        <div class="entity-card-name">${summary.totalStations}</div>
+        <div class="entity-card-meta">Estructura de la línea</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Operadores únicos</div>
+        <div class="entity-card-name">${summary.totalOperatorsUnique}</div>
+        <div class="entity-card-meta">Resumen simulado</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Subconjuntos únicos</div>
+        <div class="entity-card-name">${summary.totalSubsetsUnique}</div>
+        <div class="entity-card-meta">Resumen simulado</div>
+      </div>
+    </div>`;
+}
+
+function renderBalanceStationDetail(station, stationIndex) {
+  const rows = station.operadores.flatMap((operator, operatorIndex) => {
+    if (!operator.actividades.length) {
       return [`
         <tr>
-          <td><strong>${esc(station.nombre)}</strong></td>
-          <td>Sin operadores</td>
-          <td>Sin subconjunto</td>
-          <td>0 actividades</td>
+          <td>${esc(operator.nombre)}</td>
+          <td>${esc(operator.subconjunto)}</td>
+          <td class="font-mono">-</td>
+          <td>Sin actividades</td>
           <td class="font-mono">0.00 s</td>
-          <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
+          <td>NECESARIO</td>
         </tr>`];
     }
 
-    return station.operadores.map(operator => {
-      const namedActivities = operator.actividades
-        .map(activity => activity.actividad)
-        .filter(Boolean)
-        .slice(0, 3);
-      const activityLabel = namedActivities.length
-        ? `${operator.activityCount} act. · ${namedActivities.join(', ')}${operator.activityCount > namedActivities.length ? '...' : ''}`
-        : `${operator.activityCount} actividades`;
-
-      return `
-        <tr>
-          <td><strong>${esc(station.nombre)}</strong></td>
-          <td>${esc(operator.nombre)}</td>
-          <td>${esc(operator.subconjunto)}</td>
-          <td>${esc(activityLabel)}</td>
-          <td class="font-mono">${fmtCatalogSeconds(operator.time)} s</td>
-          <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
-        </tr>`;
-    });
+    return operator.actividades.map((activity, activityIndex) => `
+      <tr>
+        <td>${esc(operator.nombre)}</td>
+        <td>${esc(operator.subconjunto)}</td>
+        <td class="font-mono">${activity.no}</td>
+        <td>${esc(activity.actividad)}</td>
+        <td>
+          <input
+            class="form-input balance-time-input"
+            type="number"
+            min="0"
+            step="0.01"
+            value="${fmt(activity.tiempo, 2)}"
+            data-balance-time
+            data-station-index="${stationIndex}"
+            data-operator-index="${operatorIndex}"
+            data-activity-index="${activityIndex}"
+          />
+        </td>
+        <td><span class="badge badge--neutral">${esc(activity.valor)}</span></td>
+      </tr>`);
   }).join('');
+
+  return `
+    <tr class="balance-station-detail-row">
+      <td colspan="6">
+        <div class="balance-station-detail">
+          <table class="balance-detail-table">
+            <thead>
+              <tr>
+                <th>Operador</th>
+                <th>Subconjunto</th>
+                <th>No.</th>
+                <th>Actividad</th>
+                <th>Tiempo</th>
+                <th>Valor</th>
+              </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </td>
+    </tr>`;
 }
 
 function renderBalanceStationRows(summary) {
-  return summary.stationLoads.map(station => `
-    <tr>
-      <td><strong>${esc(station.nombre)}</strong></td>
-      <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
-      <td>${esc(station.operadoresLabel)}</td>
-      <td>${esc(station.subconjuntosLabel)}</td>
-    </tr>
-  `).join('');
+  return summary.stationLoads.map((station, stationIndex) => {
+    const isOpen = _balanceOpenStationIds.has(station.id);
+    return `
+      <tr class="balance-station-row${isOpen ? ' balance-station-row--open' : ''}">
+        <td><strong>${esc(station.nombre)}</strong></td>
+        <td class="font-mono"><span data-balance-station-total="${esc(station.id)}">${fmtCatalogSeconds(station.time)}</span> s</td>
+        <td>${esc(station.operadoresLabel)}</td>
+        <td>${esc(station.subconjuntosLabel)}</td>
+        <td class="font-mono">${station.activityCount}</td>
+        <td>
+          <button class="btn btn--ghost btn--sm" type="button" data-balance-toggle="${esc(station.id)}">
+            ${isOpen ? 'Ocultar' : 'Desplegar'}
+          </button>
+        </td>
+      </tr>
+      ${isOpen ? renderBalanceStationDetail(station, stationIndex) : ''}`;
+  }).join('');
+}
+
+function getBalanceTakt(summary) {
+  const config = getDashboardLineConfig(summary.area, summary.line);
+  const piecesPerHour = Number(config.piezasPorHora);
+  return piecesPerHour > 0 ? 3600 / piecesPerHour : 0;
+}
+
+function getBalanceChartRows(summary, graphBy) {
+  if (graphBy === 'operator') return summary.operatorLoads;
+  if (graphBy === 'subconjunto') return summary.subconjuntoLoads;
+  return summary.stationLoads.map(station => ({
+    label: station.nombre,
+    time: station.time
+  }));
+}
+
+function getBalanceChartCopy(graphBy) {
+  if (graphBy === 'operator') {
+    return {
+      title: 'Gráfico de tiempos por operador',
+      subtitle: 'Suma operadores repetidos en todas las estaciones'
+    };
+  }
+  if (graphBy === 'subconjunto') {
+    return {
+      title: 'Gráfico de tiempos por subconjunto',
+      subtitle: 'Suma tiempos por subconjunto en toda la línea'
+    };
+  }
+  return {
+    title: 'Gráfico de tiempos por estación',
+    subtitle: 'Tiempo total de cada estación contra Takt Time'
+  };
+}
+
+function getBalanceChartMetrics(summary) {
+  const takt = getBalanceTakt(summary);
+  const bottleneck = summary.stationLoads.reduce((max, station) => (
+    station.time > max.time ? { label: station.nombre, time: station.time } : max
+  ), { label: 'N/A', time: 0 });
+
+  return {
+    hasCatalog: summary.hasCatalog,
+    hasTimes: summary.hasOperationalData,
+    takt,
+    bottleneck
+  };
+}
+
+function renderBalanceChartSection(summary) {
+  const chartConfig = getBalanceChartConfig(summary.area, summary.line);
+  const graphBy = chartConfig.graficoPor;
+  const copy = getBalanceChartCopy(graphBy);
+  const metrics = getBalanceChartMetrics(summary);
+  const rows = getBalanceChartRows(summary, graphBy);
+
+  return `
+    <div class="card dashboard-chart-card balance-chart-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title" id="balance-chart-title">${copy.title}</div>
+          <div class="card-subtitle" id="balance-chart-subtitle">${copy.subtitle}</div>
+        </div>
+        <div class="form-group balance-chart-control">
+          <label class="form-label" for="balance-chart-by">Ver gráfico por</label>
+          <select class="form-select" id="balance-chart-by">
+            <option value="station"${graphBy === 'station' ? ' selected' : ''}>Estación</option>
+            <option value="operator"${graphBy === 'operator' ? ' selected' : ''}>Operador</option>
+            <option value="subconjunto"${graphBy === 'subconjunto' ? ' selected' : ''}>Subconjunto</option>
+          </select>
+        </div>
+      </div>
+      <div class="card-body" id="balance-chart-wrap">
+        ${renderDashboardChart(metrics, rows, graphBy)}
+      </div>
+    </div>`;
+}
+
+function bindBalanceChartControls(container, summary) {
+  const select = container.querySelector('#balance-chart-by');
+  if (!select) return;
+
+  select.addEventListener('change', () => {
+    const graphBy = normalizeGraphBy(select.value);
+    saveBalanceChartConfig(summary.area, summary.line, { graficoPor: graphBy });
+    refreshBalanceSimulationView(container);
+  });
+}
+
+function updateBalanceSimulatedTime(stationIndex, operatorIndex, activityIndex, value) {
+  const activity = _balanceSimulationDraft
+    ?.estaciones?.[stationIndex]
+    ?.operadores?.[operatorIndex]
+    ?.actividades?.[activityIndex];
+  if (!activity) return;
+  activity.tiempo = Math.max(0, parseSimulaTime(value));
+}
+
+function refreshBalanceSimulationView(container) {
+  const summary = getBalanceSimulationSummary();
+  const graphBy = normalizeGraphBy(container.querySelector('#balance-chart-by')?.value);
+  const copy = getBalanceChartCopy(graphBy);
+  const cycleTotalEl = container.querySelector('[data-balance-cycle-total]');
+  const chartTitleEl = container.querySelector('#balance-chart-title');
+  const chartSubtitleEl = container.querySelector('#balance-chart-subtitle');
+  const chartWrapEl = container.querySelector('#balance-chart-wrap');
+
+  if (cycleTotalEl) cycleTotalEl.textContent = fmtCatalogSeconds(summary.totalTiempo);
+  summary.stationLoads.forEach(station => {
+    const stationTotalEl = Array.from(container.querySelectorAll('[data-balance-station-total]'))
+      .find(element => element.dataset.balanceStationTotal === station.id);
+    if (stationTotalEl) stationTotalEl.textContent = fmtCatalogSeconds(station.time);
+  });
+  if (chartTitleEl) chartTitleEl.textContent = copy.title;
+  if (chartSubtitleEl) chartSubtitleEl.textContent = copy.subtitle;
+  if (chartWrapEl) {
+    chartWrapEl.innerHTML = renderDashboardChart(
+      getBalanceChartMetrics(summary),
+      getBalanceChartRows(summary, graphBy),
+      graphBy
+    );
+  }
+}
+
+function bindBalanceSimulationControls(container) {
+  container.querySelectorAll('[data-balance-toggle]').forEach(button => {
+    button.addEventListener('click', () => {
+      const stationId = button.dataset.balanceToggle;
+      if (_balanceOpenStationIds.has(stationId)) {
+        _balanceOpenStationIds.delete(stationId);
+      } else {
+        _balanceOpenStationIds.add(stationId);
+      }
+      renderBalance(container);
+    });
+  });
+
+  container.querySelectorAll('[data-balance-time]').forEach(input => {
+    input.addEventListener('input', () => {
+      updateBalanceSimulatedTime(
+        Number(input.dataset.stationIndex),
+        Number(input.dataset.operatorIndex),
+        Number(input.dataset.activityIndex),
+        input.value
+      );
+      refreshBalanceSimulationView(container);
+    });
+
+    input.addEventListener('change', () => {
+      const stationId = _balanceSimulationDraft
+        ?.estaciones?.[Number(input.dataset.stationIndex)]
+        ?.id;
+      updateBalanceSimulatedTime(
+        Number(input.dataset.stationIndex),
+        Number(input.dataset.operatorIndex),
+        Number(input.dataset.activityIndex),
+        input.value
+      );
+      if (stationId) _balanceOpenStationIds.add(stationId);
+      renderBalance(container);
+    });
+  });
+
+  container.querySelector('[data-balance-reset-real]')?.addEventListener('click', () => {
+    resetBalanceSimulation(getSelectedDashboardContext().area, getSelectedDashboardContext().line);
+    showToast('Simulación restaurada con los datos reales del Catálogo.', 'success');
+    renderBalance(container);
+  });
 }
 
 function renderStudyTimesSection() {
@@ -4294,65 +5047,50 @@ function renderStudyTimesSection() {
 }
 
 function renderBalance(container) {
-  const summary = getCatalogLineSummary();
+  const summary = getBalanceSimulationSummary();
 
   container.innerHTML = `
-    <div class="page-header">
-      <h1 class="page-title">Balanceo de Línea</h1>
-      <p class="page-subtitle">Distribución conectada al Catálogo guardado por línea</p>
+    <div class="page-header balance-page-header">
+      <div>
+        <h1 class="page-title">Balanceo de Línea</h1>
+        <p class="page-subtitle">Simulación temporal conectada al Catálogo guardado por línea</p>
+      </div>
+      ${summary.hasOperationalData ? `
+        <button class="btn btn--secondary" type="button" data-balance-reset-real>Restaurar datos reales</button>
+      ` : ''}
     </div>
 
     ${renderStudyTimesSection()}
 
-    ${renderCatalogConnectionContextCards(summary)}
+    ${renderBalanceContextCards(summary)}
 
     ${!summary.hasOperationalData ? renderCatalogConnectionEmpty() : `
-      <div class="card mb-6">
-        <div class="card-header">
-          <div>
-            <div class="card-title">Distribución por estación y operador</div>
-            <div class="card-subtitle">Fuente: catalogDataByLine · ${esc(summary.area)} / ${esc(summary.linea)}</div>
-          </div>
-        </div>
-        <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
-          <table>
-            <thead>
-              <tr>
-                <th>Estación</th>
-                <th>Operador</th>
-                <th>Subconjunto</th>
-                <th>Actividades</th>
-                <th>Tiempo operador</th>
-                <th>Tiempo estación</th>
-              </tr>
-            </thead>
-            <tbody>${renderBalanceOperatorRows(summary)}</tbody>
-          </table>
-        </div>
-      </div>
+      ${renderBalanceChartSection(summary)}
 
       <div class="card">
         <div class="card-header">
           <div>
             <div class="card-title">Resumen por estación</div>
-            <div class="card-subtitle">Carga total, operadores y subconjuntos relacionados</div>
+            <div class="card-subtitle">Despliega una estación para simular tiempos sin modificar Catálogo</div>
           </div>
         </div>
         <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
-          <table>
+          <table class="balance-summary-table">
             <thead>
               <tr>
                 <th>Estación</th>
                 <th>Tiempo total</th>
                 <th>Operadores</th>
                 <th>Subconjuntos</th>
+                <th>Actividades</th>
+                <th>Acción</th>
               </tr>
             </thead>
             <tbody>${renderBalanceStationRows(summary)}</tbody>
           </table>
         </div>
       </div>
-    `}
+  `}
   `;
 
   container.querySelectorAll('.bal-study-filter-btn').forEach(btn => {
@@ -4365,6 +5103,9 @@ function renderBalance(container) {
   container.querySelectorAll('.btn-use-in-balance').forEach(btn => {
     btn.addEventListener('click', () => openUseInBalanceModal(btn.dataset.opId));
   });
+
+  bindBalanceChartControls(container, summary);
+  bindBalanceSimulationControls(container);
 }
 
 function openUseInBalanceModal(opId) {
@@ -4942,27 +5683,423 @@ function renderYamazumiStationRows(summary) {
   `).join('');
 }
 
-function renderYamazumi(container) {
+function getYamazumiSimulationCatalog(area, line, forceReset = false) {
+  const key = catalogLineKey(area, line);
+  const realCatalog = getDashboardCatalog(area, line);
+  if (!realCatalog) {
+    if (_yamazumiSimulationKey === key) {
+      _yamazumiSimulationDraft = null;
+      _yamazumiSimulationKey = null;
+      _yamazumiSelectedStationId = null;
+    }
+    return null;
+  }
+
+  if (forceReset || !_yamazumiSimulationDraft || _yamazumiSimulationKey !== key) {
+    _yamazumiSimulationDraft = deepClone(realCatalog);
+    _yamazumiSimulationKey = key;
+    _yamazumiSelectedStationId = _yamazumiSimulationDraft.estaciones?.[0]?.id || null;
+  }
+
+  return _yamazumiSimulationDraft;
+}
+
+function resetYamazumiSimulation(area, line) {
+  return getYamazumiSimulationCatalog(area, line, true);
+}
+
+function flattenYamazumiStationActivities(station) {
+  const rows = [];
+  (station?.operadores || []).forEach((operator, operatorIndex) => {
+    const operatorName = String(operator.nombre || '').trim() || `OP${operatorIndex + 1}`;
+    const subconjunto = String(operator.subconjunto || '').trim() || 'Sin subconjunto';
+    (operator.actividades || []).forEach((activity, activityIndex) => {
+      rows.push({
+        id: activity.id || `activity-${activityIndex + 1}`,
+        operatorIndex,
+        activityIndex,
+        operador: operatorName,
+        subconjunto,
+        no: activity.no || activityIndex + 1,
+        actividad: String(activity.actividad || activity.name || activity.nombre || '').trim(),
+        tiempo: catalogSeconds(activity.tiempo ?? activity.time ?? activity.standardTime),
+        valor: normalizeSimulaValor(activity.valor)
+      });
+    });
+  });
+  return rows;
+}
+
+function buildYamazumiSimulationSummary(catalog, context) {
+  const uniqueOperators = new Set();
+  const uniqueSubsets = new Set();
+  let totalOperators = 0;
+  let totalActivities = 0;
+  let totalTiempo = 0;
+
+  const stationLoads = (catalog?.estaciones || []).map((station, stationIndex) => {
+    const stationName = String(station.nombre || '').trim() || `Estación ${stationIndex + 1}`;
+    const operadores = (station.operadores || []).map((operator, operatorIndex) => {
+      const operatorName = String(operator.nombre || '').trim() || `OP${operatorIndex + 1}`;
+      const subconjunto = String(operator.subconjunto || '').trim() || 'Sin subconjunto';
+      const actividades = (operator.actividades || []).map((activity, activityIndex) => ({
+        id: activity.id || `activity-${activityIndex + 1}`,
+        no: activity.no || activityIndex + 1,
+        actividad: String(activity.actividad || activity.name || activity.nombre || '').trim(),
+        tiempo: catalogSeconds(activity.tiempo ?? activity.time ?? activity.standardTime),
+        valor: normalizeSimulaValor(activity.valor)
+      }));
+      const operatorTime = actividades.reduce((sum, activity) => sum + activity.tiempo, 0);
+
+      totalOperators += 1;
+      totalActivities += actividades.length;
+      uniqueOperators.add(operatorName);
+      if (subconjunto !== 'Sin subconjunto') uniqueSubsets.add(subconjunto);
+
+      return {
+        id: operator.id || `operator-${operatorIndex + 1}`,
+        nombre: operatorName,
+        subconjunto,
+        actividades,
+        activityCount: actividades.length,
+        time: operatorTime
+      };
+    });
+    const activities = flattenYamazumiStationActivities(station);
+    const stationTotal = activities.reduce((sum, activity) => sum + activity.tiempo, 0);
+    const subconjuntos = [...new Set(operadores.map(operator => operator.subconjunto).filter(Boolean))];
+    totalTiempo += stationTotal;
+
+    return {
+      id: station.id || `station-${stationIndex + 1}`,
+      nombre: stationName,
+      time: stationTotal,
+      total: stationTotal,
+      operadores,
+      activities,
+      operatorCount: operadores.length,
+      activityCount: activities.length,
+      operadoresLabel: operadores.length ? operadores.map(operator => operator.nombre).join(', ') : 'Sin operadores',
+      subconjuntos,
+      subconjuntosLabel: subconjuntos.length ? subconjuntos.join(', ') : 'Sin subconjuntos'
+    };
+  });
+
+  if (!_yamazumiSelectedStationId || !stationLoads.some(station => station.id === _yamazumiSelectedStationId)) {
+    _yamazumiSelectedStationId = stationLoads[0]?.id || null;
+  }
+
+  return {
+    catalog,
+    planta: context.planta,
+    area: context.area,
+    line: context.line,
+    linea: context.line,
+    hasCatalog: !!catalog,
+    hasOperationalData: !!catalog && totalOperators > 0 && totalActivities > 0,
+    totalTiempo,
+    totalStations: stationLoads.length,
+    totalOperators,
+    totalActivities,
+    totalOperatorsUnique: uniqueOperators.size,
+    totalSubsetsUnique: uniqueSubsets.size,
+    stationLoads,
+    selectedStationId: _yamazumiSelectedStationId,
+    selectedStation: stationLoads.find(station => station.id === _yamazumiSelectedStationId) || null
+  };
+}
+
+function getYamazumiSimulationSummary(forceReset = false) {
+  const context = getSelectedDashboardContext();
+  const catalog = getYamazumiSimulationCatalog(context.area, context.line, forceReset);
+  return buildYamazumiSimulationSummary(catalog, context);
+}
+
+function renderYamazumiContextCards(summary) {
+  return `
+    <div class="entity-grid mb-6">
+      <div class="entity-card">
+        <div class="entity-card-label">Planta</div>
+        <div class="entity-card-name">${esc(summary.planta)}</div>
+        <div class="entity-card-meta">Contexto de Catálogo</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Área</div>
+        <div class="entity-card-name">${esc(summary.area)}</div>
+        <div class="entity-card-meta">Selección del Dashboard</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Línea</div>
+        <div class="entity-card-name">${esc(summary.linea)}</div>
+        <div class="entity-card-meta">Selección del Dashboard</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Tiempo ciclo total</div>
+        <div class="entity-card-name">${fmtCatalogSeconds(summary.totalTiempo)}<span style="font-size:var(--font-14);font-weight:500;color:var(--text-muted)"> seg</span></div>
+        <div class="entity-card-meta">Simulación Yamazumi</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Total estaciones</div>
+        <div class="entity-card-name">${summary.totalStations}</div>
+        <div class="entity-card-meta">Estructura de línea</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Operadores únicos</div>
+        <div class="entity-card-name">${summary.totalOperatorsUnique}</div>
+        <div class="entity-card-meta">Resumen simulado</div>
+      </div>
+      <div class="entity-card">
+        <div class="entity-card-label">Subconjuntos únicos</div>
+        <div class="entity-card-name">${summary.totalSubsetsUnique}</div>
+        <div class="entity-card-meta">Resumen simulado</div>
+      </div>
+    </div>`;
+}
+
+function getYamazumiValorClass(valor) {
+  if (valor === 'AGREGA VALOR') return 'value-add';
+  if (valor === 'NO AGREGA VALOR') return 'no-value';
+  return 'necessary';
+}
+
+function renderYamazumiAdvancedChart(summary, takt) {
+  const chartHeight = 320;
+  const labelHeight = 62;
+  const totalHeight = chartHeight + labelHeight;
+  const maxLoad = Math.max(...summary.stationLoads.map(station => station.time), takt || 0, 1);
+  const maxVal = Math.ceil((maxLoad * 1.2) / 10) * 10 || 10;
+  const scale = chartHeight / maxVal;
+  const tickStep = maxVal <= 80 ? 10 : Math.ceil(maxVal / 6 / 10) * 10;
+  const ticks = Array.from({ length: Math.floor(maxVal / tickStep) + 1 }, (_, index) => index * tickStep);
+
+  return `
+    <div class="catalog-yamazumi-chart yamazumi-advanced-chart" style="--catalog-yama-total-height:${totalHeight}px;--catalog-yama-label-height:${labelHeight}px">
+      <div class="catalog-yamazumi-axis">
+        ${ticks.map(tick => `
+          <div class="catalog-yamazumi-tick" style="bottom:${labelHeight + Math.round(tick * scale)}px">
+            <span>${tick}</span>
+          </div>
+        `).join('')}
+      </div>
+      <div class="catalog-yamazumi-plot">
+        ${ticks.map(tick => `
+          <div class="catalog-yamazumi-gridline" style="bottom:${labelHeight + Math.round(tick * scale)}px"></div>
+        `).join('')}
+        ${takt > 0 ? `
+          <div class="catalog-yamazumi-takt" style="bottom:${labelHeight + Math.round(takt * scale)}px">
+            <span>Takt ${fmt(takt, 2)}s</span>
+          </div>
+        ` : ''}
+        <div class="catalog-yamazumi-bars">
+          ${summary.stationLoads.map(station => {
+            const barHeight = Math.max(Math.round(station.time * scale), station.time > 0 ? 2 : 0);
+            const selected = station.id === summary.selectedStationId;
+            return `
+              <button class="catalog-yamazumi-col yamazumi-station-col ${selected ? 'yamazumi-station-col--selected' : ''}" type="button" data-yama-select-station="${esc(station.id)}">
+                <div class="catalog-yamazumi-value">${fmtCatalogSeconds(station.time)}s</div>
+                <div class="catalog-yamazumi-bar" style="height:${barHeight}px">
+                  ${station.activities.length ? station.activities.map(activity => {
+                    const segmentHeight = Math.max(Math.round(activity.tiempo * scale), activity.tiempo > 0 ? 2 : 0);
+                    const showLabel = segmentHeight >= 18;
+                    const title = [
+                      `Estación: ${station.nombre}`,
+                      `Operador: ${activity.operador}`,
+                      `Subconjunto: ${activity.subconjunto}`,
+                      `Actividad: ${activity.actividad}`,
+                      `Tiempo: ${fmtCatalogSeconds(activity.tiempo)} s`,
+                      `Valor: ${activity.valor}`
+                    ].join('\n');
+                    return `
+                      <div
+                        class="catalog-yamazumi-segment yamazumi-activity-segment yamazumi-activity-segment--${getYamazumiValorClass(activity.valor)}"
+                        style="height:${segmentHeight}px"
+                        title="${esc(title)}"
+                      >
+                        ${showLabel ? `<span>${fmtCatalogSeconds(activity.tiempo)}s</span>` : ''}
+                      </div>`;
+                  }).join('') : '<div class="yamazumi-empty-bar">Sin actividades</div>'}
+                </div>
+                <div class="catalog-yamazumi-label" title="${esc(station.nombre)}">${esc(station.nombre)}</div>
+              </button>`;
+          }).join('')}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderYamazumiSummaryRows(summary) {
+  return summary.stationLoads.map(station => `
+    <tr class="${station.id === summary.selectedStationId ? 'row--selected' : ''}">
+      <td><strong>${esc(station.nombre)}</strong></td>
+      <td class="font-mono">${fmtCatalogSeconds(station.time)} s</td>
+      <td>${esc(station.operadoresLabel)}</td>
+      <td>${esc(station.subconjuntosLabel)}</td>
+      <td class="font-mono">${station.activityCount}</td>
+      <td>
+        <button class="btn btn--ghost btn--sm" type="button" data-yama-select-station="${esc(station.id)}">
+          Seleccionar
+        </button>
+      </td>
+    </tr>
+  `).join('');
+}
+
+function getYamazumiValueRows(station) {
+  const totals = {
+    'AGREGA VALOR': 0,
+    'NO AGREGA VALOR': 0,
+    NECESARIO: 0
+  };
+  (station?.activities || []).forEach(activity => {
+    totals[normalizeSimulaValor(activity.valor)] += catalogSeconds(activity.tiempo);
+  });
+  const total = Object.values(totals).reduce((sum, time) => sum + time, 0);
+  return Object.keys(totals).map(valor => ({
+    valor,
+    time: totals[valor],
+    pct: total > 0 ? (totals[valor] / total) * 100 : 0
+  }));
+}
+
+function renderYamazumiValuePie(station) {
+  if (!station || station.time <= 0) {
+    return `<div class="dashboard-chart-empty"><strong>Esta estación no tiene tiempos válidos.</strong></div>`;
+  }
+  const rows = getYamazumiValueRows(station);
+  let cursor = 0;
+  const colors = {
+    'AGREGA VALOR': '#2563EB',
+    'NO AGREGA VALOR': '#111827',
+    NECESARIO: '#94A3B8'
+  };
+  const gradient = rows.map(row => {
+    const start = cursor;
+    cursor += row.pct;
+    return `${colors[row.valor]} ${start}% ${cursor}%`;
+  }).join(', ');
+
+  return `
+    <div class="yamazumi-pie-layout">
+      <div class="yamazumi-pie" style="background:conic-gradient(${gradient || '#E5E7EB 0% 100%'})"></div>
+      <table class="yamazumi-value-table">
+        <thead>
+          <tr>
+            <th>Valor</th>
+            <th>Tiempo</th>
+            <th>%</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(row => `
+            <tr>
+              <td><span class="yamazumi-value-dot yamazumi-value-dot--${getYamazumiValorClass(row.valor)}"></span>${esc(row.valor)}</td>
+              <td class="font-mono">${fmtCatalogSeconds(row.time)} s</td>
+              <td class="font-mono">${fmt(row.pct, 1)}%</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function renderYamazumiStationDetail(summary) {
+  const station = summary.selectedStation;
+  if (!station) return `<div class="dashboard-chart-empty"><strong>Selecciona una estación.</strong></div>`;
+  const stationOptions = summary.stationLoads.map(target => `
+    <option value="${esc(target.id)}"${target.id === station.id ? ' selected' : ''}>${esc(target.nombre)}</option>
+  `).join('');
+
+  return `
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">${esc(station.nombre)}</div>
+          <div class="card-subtitle">${fmtCatalogSeconds(station.time)} s · ${esc(station.operadoresLabel)} · ${esc(station.subconjuntosLabel)}</div>
+        </div>
+      </div>
+      <div class="card-body">
+        ${station.activities.length ? `
+          <div style="overflow-x:auto">
+            <table class="yamazumi-detail-table">
+              <thead>
+                <tr>
+                  <th>Operador</th>
+                  <th>Subconjunto</th>
+                  <th>No.</th>
+                  <th>Actividad</th>
+                  <th>Tiempo</th>
+                  <th>Valor</th>
+                  <th>Mover a estación</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${station.activities.map(activity => `
+                  <tr>
+                    <td>${esc(activity.operador)}</td>
+                    <td>${esc(activity.subconjunto)}</td>
+                    <td class="font-mono">${activity.no}</td>
+                    <td>${esc(activity.actividad)}</td>
+                    <td>
+                      <input
+                        class="form-input yamazumi-time-input"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value="${fmt(activity.tiempo, 2)}"
+                        data-yama-time
+                        data-station-id="${esc(station.id)}"
+                        data-operator-index="${activity.operatorIndex}"
+                        data-activity-index="${activity.activityIndex}"
+                      />
+                    </td>
+                    <td><span class="badge badge--neutral">${esc(activity.valor)}</span></td>
+                    <td>
+                      <select
+                        class="form-select yamazumi-move-select"
+                        data-yama-move
+                        data-from-station-id="${esc(station.id)}"
+                        data-operator-index="${activity.operatorIndex}"
+                        data-activity-index="${activity.activityIndex}"
+                      >
+                        ${stationOptions}
+                      </select>
+                    </td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+        ` : '<div class="dashboard-chart-empty"><strong>Esta estación no tiene actividades.</strong></div>'}
+      </div>
+    </div>`;
+}
+
+function renderYamazumiAdvanced(container) {
   _redistribActive = false;
   _redistribAssignments = null;
 
-  const summary = getCatalogLineSummary();
+  const summary = getYamazumiSimulationSummary();
   const takt = getCatalogYamazumiTakt(summary);
 
   container.innerHTML = `
-    <div class="page-header">
-      <h1 class="page-title">Yamazumi</h1>
-      <p class="page-subtitle">Gráfica conectada al Catálogo guardado por línea</p>
+    <div class="page-header balance-page-header">
+      <div>
+        <h1 class="page-title">Yamazumi</h1>
+        <p class="page-subtitle">Simulación visual temporal por estación</p>
+      </div>
+      ${summary.hasOperationalData ? `
+        <button class="btn btn--secondary" type="button" data-yama-reset-real>Restaurar datos reales</button>
+      ` : ''}
     </div>
 
-    ${renderCatalogConnectionContextCards(summary)}
+    ${renderYamazumiContextCards(summary)}
 
     ${!summary.hasOperationalData ? renderCatalogConnectionEmpty() : `
       <div class="card mb-6">
         <div class="card-header">
           <div>
-            <div class="card-title">Gráfica Yamazumi</div>
-            <div class="card-subtitle">Barras por estación segmentadas por operador</div>
+            <div class="card-title">Gráfica Yamazumi avanzada</div>
+            <div class="card-subtitle">Barras por estación segmentadas por actividad</div>
           </div>
           ${takt > 0 ? `
             <div class="yama-takt-legend">
@@ -4972,36 +6109,149 @@ function renderYamazumi(container) {
           ` : ''}
         </div>
         <div class="card-body" style="padding:var(--sp-4) var(--sp-5)">
-          ${renderCatalogYamazumiChart(summary, takt)}
+          ${renderYamazumiAdvancedChart(summary, takt)}
+        </div>
+      </div>
+
+      <div class="card mb-6">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Resumen por estación</div>
+            <div class="card-subtitle">Selecciona una estación para revisar actividades y moverlas</div>
+          </div>
+        </div>
+        <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
+          <table>
+            <thead>
+              <tr>
+                <th>Estación</th>
+                <th>Tiempo total</th>
+                <th>Operadores</th>
+                <th>Subconjuntos</th>
+                <th>Actividades</th>
+                <th>Acción</th>
+              </tr>
+            </thead>
+            <tbody>${renderYamazumiSummaryRows(summary)}</tbody>
+          </table>
         </div>
       </div>
 
       <div class="two-col-layout">
+        ${renderYamazumiStationDetail(summary)}
         <div class="card">
-          <div class="card-header"><div class="card-title">Operadores relacionados</div></div>
-          <div class="card-body">
-            <div class="catalog-yamazumi-legend">${renderYamazumiCatalogLegend(summary)}</div>
+          <div class="card-header">
+            <div>
+              <div class="card-title">Pastel por Valor</div>
+              <div class="card-subtitle">Distribución por tiempo de la estación seleccionada</div>
+            </div>
           </div>
-        </div>
-        <div class="card">
-          <div class="card-header"><div class="card-title">Resumen por estación</div></div>
-          <div style="overflow-x:auto;border-radius:0 0 var(--radius-lg) var(--radius-lg)">
-            <table>
-              <thead>
-                <tr>
-                  <th>Estación</th>
-                  <th>Tiempo total</th>
-                  <th>Operadores</th>
-                  <th>Subconjuntos</th>
-                </tr>
-              </thead>
-              <tbody>${renderYamazumiStationRows(summary)}</tbody>
-            </table>
+          <div class="card-body">
+            ${renderYamazumiValuePie(summary.selectedStation)}
           </div>
         </div>
       </div>
     `}
   `;
+
+  bindYamazumiAdvancedControls(container);
+}
+
+function recalcYamazumiActivityNumbers(operator) {
+  operator.actividades = (operator.actividades || []).map((activity, index) => ({
+    ...activity,
+    no: index + 1
+  }));
+}
+
+function updateYamazumiSimulatedTime(stationId, operatorIndex, activityIndex, value) {
+  const station = (_yamazumiSimulationDraft?.estaciones || []).find(item => item.id === stationId);
+  const activity = station?.operadores?.[operatorIndex]?.actividades?.[activityIndex];
+  if (!activity) return;
+  activity.tiempo = Math.max(0, parseSimulaTime(value));
+}
+
+function moveYamazumiActivity(fromStationId, operatorIndex, activityIndex, toStationId) {
+  if (!toStationId || fromStationId === toStationId) return;
+  const stations = _yamazumiSimulationDraft?.estaciones || [];
+  const fromStation = stations.find(station => station.id === fromStationId);
+  const toStation = stations.find(station => station.id === toStationId);
+  const fromOperator = fromStation?.operadores?.[operatorIndex];
+  const activity = fromOperator?.actividades?.[activityIndex];
+  if (!fromStation || !toStation || !fromOperator || !activity) return;
+
+  const movedActivity = deepClone(activity);
+  fromOperator.actividades.splice(activityIndex, 1);
+  if (fromOperator.actividades.length) {
+    recalcYamazumiActivityNumbers(fromOperator);
+  } else {
+    fromStation.operadores.splice(operatorIndex, 1);
+  }
+
+  const operatorName = String(fromOperator.nombre || '').trim();
+  const subconjunto = String(fromOperator.subconjunto || '').trim();
+  let targetOperator = (toStation.operadores || []).find(operator =>
+    String(operator.nombre || '').trim() === operatorName &&
+    String(operator.subconjunto || '').trim() === subconjunto
+  );
+  if (!targetOperator) {
+    targetOperator = {
+      id: generateId('YAMA-OP'),
+      nombre: operatorName || `OP${(toStation.operadores || []).length + 1}`,
+      subconjunto,
+      actividades: []
+    };
+    toStation.operadores = toStation.operadores || [];
+    toStation.operadores.push(targetOperator);
+  }
+  targetOperator.actividades = targetOperator.actividades || [];
+  targetOperator.actividades.push(movedActivity);
+  recalcYamazumiActivityNumbers(targetOperator);
+  _yamazumiSelectedStationId = toStationId;
+}
+
+function bindYamazumiAdvancedControls(container) {
+  container.querySelectorAll('[data-yama-select-station]').forEach(button => {
+    button.addEventListener('click', () => {
+      _yamazumiSelectedStationId = button.dataset.yamaSelectStation;
+      renderYamazumi(container);
+    });
+  });
+
+  container.querySelectorAll('[data-yama-time]').forEach(input => {
+    input.addEventListener('change', () => {
+      updateYamazumiSimulatedTime(
+        input.dataset.stationId,
+        Number(input.dataset.operatorIndex),
+        Number(input.dataset.activityIndex),
+        input.value
+      );
+      renderYamazumi(container);
+    });
+  });
+
+  container.querySelectorAll('[data-yama-move]').forEach(select => {
+    select.addEventListener('change', () => {
+      moveYamazumiActivity(
+        select.dataset.fromStationId,
+        Number(select.dataset.operatorIndex),
+        Number(select.dataset.activityIndex),
+        select.value
+      );
+      renderYamazumi(container);
+    });
+  });
+
+  container.querySelector('[data-yama-reset-real]')?.addEventListener('click', () => {
+    const context = getSelectedDashboardContext();
+    resetYamazumiSimulation(context.area, context.line);
+    showToast('Yamazumi restaurado con los datos reales del Catálogo.', 'success');
+    renderYamazumi(container);
+  });
+}
+
+function renderYamazumi(container) {
+  renderYamazumiAdvanced(container);
 }
 
 function renderYamazumiLegacy(container) {
